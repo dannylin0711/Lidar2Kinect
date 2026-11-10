@@ -539,6 +539,55 @@ static void test_smoothing(void) {
     CHECK(worst > 0.001f); /* it does filter */
 }
 
+static void test_cabinet_scene(void) {
+    /* the synthetic figure seen like Dance Evolution's cabinet Kinect: 2 m up, tilted down */
+    l2k_mapper m;
+    l2k_src_body a, b;
+    l2k_skeleton_frame f;
+    l2k_vec3 up = l2k_synth_up(L2K_SYNTH_CABINET_TILT), level = l2k_synth_up(0.0f);
+    static uint16_t img[320 * 240];
+    const l2k_skeleton *s;
+    float u, v, top = 240, bottom = 0;
+    int i, j, n = 0;
+
+    /* the level scene is unchanged: l2k_synth_body == l2k_synth_body_at(height 1 m, tilt 0) */
+    l2k_synth_body(0.37, 1, 2, &a);
+    l2k_synth_body_at(0.37, 1, 2, L2K_SYNTH_CAMERA_HEIGHT, 0.0f, &b);
+    CHECK(memcmp(&a, &b, sizeof a) == 0);
+    CHECK(level.x == L2K_SYNTH_UP_X && level.y == L2K_SYNTH_UP_Y && level.z == L2K_SYNTH_UP_Z);
+
+    l2k_mapper_init(&m, NULL);
+    for (i = 0; i < 30; i++) {
+        l2k_synth_body_at(i / 30.0, 0, 1, L2K_SYNTH_CABINET_HEIGHT, L2K_SYNTH_CABINET_TILT, &a);
+        l2k_mapper_map(&m, &a, 1, up, l2k_quadrant_from_up(up.x, up.y), (uint64_t)i * 33333, L2K_SOURCE_SYNTHETIC, &f);
+    }
+    s = &f.skeletons[0];
+    CHECK(s->state == L2K_SKELETON_TRACKED);
+    /* the sensor reports how it is placed: tilt -24 degrees, floor 2 m below along up */
+    CHECK(nearly(l2k_elevation_degrees(f.up), L2K_SYNTH_CABINET_TILT, 0.01f));
+    CHECK(nearly(f.up.y, 0.91355f, 1e-4f) && nearly(f.up.z, -0.40674f, 1e-4f));
+    CHECK((f.flags & L2K_FRAME_FLOOR_VALID) && nearly(f.floor_plane.w, L2K_SYNTH_CABINET_HEIGHT, 0.06f));
+    CHECK(nearly(f.floor_plane.z, f.up.z, 1e-6f));
+    /* still upright along up: head above the hip centre by about 0.7 m */
+    {
+        l2k_vec3 h = s->joints[L2K_JOINT_HEAD], c = s->joints[L2K_JOINT_HIP_CENTER];
+        float rise = f.up.x * (h.x - c.x) + f.up.y * (h.y - c.y) + f.up.z * (h.z - c.z);
+        CHECK(rise > 0.6f && rise < 0.8f);
+    }
+    /* framed: every joint inside the 320x240 image, the figure spanning most of its height */
+    for (j = 0; j < L2K_JOINT_COUNT; j++) {
+        CHECK(l2k_skeleton_to_depth_pixel(s->joints[j], 320, 240, &u, &v) == 1);
+        CHECK(u >= 0 && u < 320 && v >= 0 && v < 240);
+        if (v < top) top = v;
+        if (v > bottom) bottom = v;
+    }
+    CHECK(top > 20 && bottom < 225 && bottom - top > 120);
+    /* the drawn silhouette is in the picture too */
+    l2k_depth_rasterize(&f, img, 320, 240, 0);
+    for (i = 0; i < 320 * 240; i++) n += l2k_depth_player(img[i]) == 1;
+    CHECK(n > 1500);
+}
+
 int main(int argc, char **argv) {
     int i;
     for (i = 1; i < argc; i++) {
@@ -553,6 +602,7 @@ int main(int argc, char **argv) {
     test_virtual_camera();
     test_depth_images();
     test_smoothing();
+    test_cabinet_scene();
     if (g_write) printf("golden packets written to %s\n", g_dir);
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

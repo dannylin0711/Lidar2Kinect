@@ -1,0 +1,9 @@
+; Import library for the probe: the five functions gamekdm.dll imports, by ordinal only, exactly
+; as the game does (docs/01 2). Built with lib /def; the probe never links by name.
+LIBRARY Kinect10.dll
+EXPORTS
+    NuiGetSensorCount@4                                   @5  NONAME
+    NuiCreateSensorByIndex@8                              @6  NONAME
+    NuiImageGetColorPixelCoordinatesFromDepthPixel@28     @9  NONAME
+    NuiTransformSmooth@8                                  @20 NONAME
+    NuiSetDeviceStatusCallback@8                          @22 NONAME

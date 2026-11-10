@@ -14,13 +14,24 @@ static l2k_vec3 v3(double x, double y, double z) {
     return r;
 }
 
+l2k_vec3 l2k_synth_up(float tilt_deg) {
+    /* a camera pitched by tilt sees world up rotated the other way: for a camera looking down
+     * (tilt < 0) up leans away from the viewer, towards -z of camera space */
+    double a = (double)tilt_deg * PI / 180.0;
+    return v3(0.0, cos(a), -sin(a));
+}
+
 void l2k_synth_body(double t, int player, int players, l2k_src_body *out) {
-    /* camera space: +x image right, +y up, the figure stands at negative z facing the camera,
-     * so its LEFT side is at +x. Floor at y = -L2K_SYNTH_CAMERA_HEIGHT. */
+    l2k_synth_body_at(t, player, players, L2K_SYNTH_CAMERA_HEIGHT, 0.0f, out);
+}
+
+void l2k_synth_body_at(double t, int player, int players, float camera_height, float tilt_deg, l2k_src_body *out) {
+    /* level camera space: +x image right, +y up, the figure stands at negative z facing the
+     * camera, so its LEFT side is at +x. Floor at y = -camera_height. Rotated by the tilt at the end. */
     double phase = player ? 0.9 : 0.0;
     double cx = (players > 1 ? (player ? 0.65 : -0.65) : 0.0) + 0.20 * sin(2 * PI * (t + phase) / 4.0);
     double cz = -2.5 + 0.20 * sin(2 * PI * (t + phase) / 6.0);
-    double floor_y = -(double)L2K_SYNTH_CAMERA_HEIGHT;
+    double floor_y = -(double)camera_height;
     double bob = 0.02 * sin(2 * PI * (t + phase) / 0.5);
     double hip_y = floor_y + 0.90 + bob, neck_y = hip_y + 0.52, head_y = neck_y + 0.17, sh_y = neck_y - 0.03;
     int side, i;
@@ -65,4 +76,13 @@ void l2k_synth_body(double t, int player, int players, l2k_src_body *out) {
         out->p[to] = v3(hx, ankle_y - 0.05, cz + 0.15);
     }
     for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) out->conf[i] = 2;
+    if (tilt_deg != 0.0f) {
+        /* pitch the camera: camera y axis = (0, cos, sin), camera z axis = (0, -sin, cos) in the level frame */
+        double a = (double)tilt_deg * PI / 180.0, c = cos(a), s = sin(a);
+        for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) {
+            double y = out->p[i].y, z = out->p[i].z;
+            out->p[i].y = (float)(y * c + z * s);
+            out->p[i].z = (float)(-y * s + z * c);
+        }
+    }
 }

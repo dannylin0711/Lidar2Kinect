@@ -38,8 +38,9 @@ All three need the same thing: skeleton frames, a 320×240 depth + player index 
   figure. Both sides compile the same files.
 - **`ios/`** — the Swift package target `L2KKit` (capture, pipeline, sender) and the universal
   iOS / iPadOS app.
-- **`windows/`** — the receiver side: fake `Kinect10.dll` and spice2x hook. Not started; the brief
-  for the agent that will build it is `windows/AGENT_PROMPT.md`.
+- **`windows/`** — the receiver side: fake `Kinect10.dll` (2b) and spice2x hook (2a) on one core,
+  plus a probe that drives the API like the game. Working in the game with the fake sender;
+  `windows/README.md`, `windows/STATUS.md`.
 
 ## Decisions
 

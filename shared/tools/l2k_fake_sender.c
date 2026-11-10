@@ -4,7 +4,10 @@
  * receivers can be developed and tested on a PC alone. It follows the same HELLO / CONFIG rules as
  * the iOS app.
  *
- *   l2k_fake_sender [-p port] [-n players] [-f fps] [-j colour.jpg] [-t seconds] host
+ *   l2k_fake_sender [-p port] [-n players] [-f fps] [-j colour.jpg] [-t seconds] [-H metres] [-a degrees] host
+ *
+ *   -H  sensor height above the floor (default L2K_SYNTH_CABINET_HEIGHT, 2 m: Dance Evolution's cabinet)
+ *   -a  sensor tilt, negative = looking down (default L2K_SYNTH_CABINET_TILT, -24)
  */
 #include "l2k/l2k.h"
 #include "l2k_net.h"
@@ -44,6 +47,7 @@ static void send_image(uint8_t type, uint8_t encoding, uint16_t w, uint16_t h, c
 int main(int argc, char **argv) {
     uint16_t port = L2K_DEFAULT_PORT;
     int players = 1, fps = 30, i;
+    float height = L2K_SYNTH_CABINET_HEIGHT, tilt = L2K_SYNTH_CABINET_TILT;
     const char *host = NULL, *jpeg_path = NULL;
     double run_seconds = 0;
     size_t jpeg_len = 0;
@@ -60,6 +64,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-f") && i + 1 < argc) fps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-j") && i + 1 < argc) jpeg_path = argv[++i];
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) run_seconds = atof(argv[++i]);
+        else if (!strcmp(argv[i], "-H") && i + 1 < argc) height = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "-a") && i + 1 < argc) tilt = (float)atof(argv[++i]);
         else if (argv[i][0] != '-' && !host) host = argv[i];
         else host = NULL, i = argc;
     }
@@ -93,7 +99,8 @@ int main(int argc, char **argv) {
     memset(&cfg, 0, sizeof cfg);
     start = next_frame = last_report = net_now_us();
     g_session = (uint32_t)(start ^ (start >> 32)) | 1u;
-    printf("l2k_fake_sender: %d player(s) at %d fps to %s:%u\n", players, fps, host, (unsigned)port);
+    printf("l2k_fake_sender: %d player(s) at %d fps to %s:%u, sensor %.2f m above the floor, tilt %.1f degrees\n", players, fps, host,
+           (unsigned)port, height, tilt);
     fflush(stdout);
 
     for (;;) {
@@ -135,9 +142,9 @@ int main(int argc, char **argv) {
             if (have_config) {
                 l2k_src_body bodies[2];
                 l2k_skeleton_frame f;
-                l2k_vec3 up = {L2K_SYNTH_UP_X, L2K_SYNTH_UP_Y, L2K_SYNTH_UP_Z};
+                l2k_vec3 up = l2k_synth_up(tilt);
                 double t = (double)(now - start) / 1e6;
-                for (i = 0; i < players; i++) l2k_synth_body(t, i, players, &bodies[i]);
+                for (i = 0; i < players; i++) l2k_synth_body_at(t, i, players, height, tilt, &bodies[i]);
                 l2k_mapper_map(&mapper, bodies, players, up, l2k_quadrant_from_up(up.x, up.y), now, L2K_SOURCE_SYNTHETIC, &f);
                 frame = f.frame_number;
                 if (cfg.streams & L2K_STREAM_SKELETON) send_packet(pkt, l2k_encode_skeleton(pkt, sizeof pkt, g_session, ++g_seq, &f));

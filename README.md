@@ -11,7 +11,7 @@ in-process.
 |---|---|---|
 | `shared/` | Portable C library: the wire protocol and the Kinect translation. The contract between both sides. | working, tested |
 | `ios/` | `L2KKit` (Swift) and the universal iOS / iPadOS app, `ios/Lidar2Kinect.xcodeproj` | builds, streams in the simulator; not yet run on a device |
-| `windows/` | Fake `Kinect10.dll` and spice2x hook | not started — see `windows/AGENT_PROMPT.md` |
+| `windows/` | Fake `Kinect10.dll` and spice2x hook | working with the fake sender, in the game — see `windows/README.md`, `windows/STATUS.md` |
 | `docs/` | Overview, what the game needs, protocol, conventions, status | |
 
 Start with `docs/00-overview.md`.

@@ -127,7 +127,7 @@ and fit the parameters. Until then the joints that depend on them are plausible 
 | Source | Camera | Bodies | Status |
 |---|---|---|---|
 | ARKit body tracking (`ARKitBodySource`) | rear, LiDAR improves scale | 1 | written, builds; **not yet run on a device** |
-| Synthetic figure (`SyntheticSource`, `l2k_synth_body`) | none | 1–2 | working; used by tests, the simulator and `l2k_fake_sender` |
+| Synthetic figure (`SyntheticSource`, `l2k_synth_body`) | none | 1–2 | working; used by tests and the simulator (level camera 1.0 m up) and by `l2k_fake_sender` (`l2k_synth_body_at`: 2.0 m up, tilted −24°, like the cabinet's Kinect; `-H` / `-a` change it) |
 | Vision body pose + LiDAR depth | rear or front | several | planned: needed for two players and for the front camera |
 
 Whether ARKit delivers scene depth and person segmentation together with body tracking depends

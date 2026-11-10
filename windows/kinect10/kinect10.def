@@ -1,0 +1,31 @@
+; Lidar2Kinect replacement for Kinect10.dll (x86).
+; Every export of Microsoft's Kinect10.dll 1.8.0.595 at its real ordinal, with the same stack size
+; (windows/docs/kinect10-exports.md). Dance Evolution imports 5, 6, 9, 20 and 22 by ordinal.
+LIBRARY Kinect10
+EXPORTS
+    K_NuiOrdinal1                                               @1 NONAME
+    NuiGetSensorCount=K_NuiGetSensorCount                       @5
+    NuiCreateSensorByIndex=K_NuiCreateSensorByIndex             @6
+    NuiCameraElevationGetAngle=K_NuiCameraElevationGetAngle     @7
+    NuiCameraElevationSetAngle=K_NuiCameraElevationSetAngle     @8
+    NuiImageGetColorPixelCoordinatesFromDepthPixel=K_NuiImageGetColorPixelCoordinatesFromDepthPixel @9
+    NuiImageGetColorPixelCoordinatesFromDepthPixelAtResolution=K_NuiImageGetColorPixelCoordinatesFromDepthPixelAtResolution @10
+    NuiImageStreamGetNextFrame=K_NuiImageStreamGetNextFrame     @11
+    NuiImageStreamOpen=K_NuiImageStreamOpen                     @12
+    NuiImageStreamReleaseFrame=K_NuiImageStreamReleaseFrame     @13
+    NuiInitialize=K_NuiInitialize                               @14
+    NuiSetFrameEndEvent=K_NuiSetFrameEndEvent                   @15
+    NuiShutdown=K_NuiShutdown                                   @16
+    NuiSkeletonGetNextFrame=K_NuiSkeletonGetNextFrame           @17
+    NuiSkeletonTrackingDisable=K_NuiSkeletonTrackingDisable     @18
+    NuiSkeletonTrackingEnable=K_NuiSkeletonTrackingEnable       @19
+    NuiTransformSmooth=K_NuiTransformSmooth                     @20
+    NuiCreateSensorById=K_NuiCreateSensorById                   @21
+    NuiSetDeviceStatusCallback=K_NuiSetDeviceStatusCallback     @22
+    NuiImageStreamSetImageFrameFlags=K_NuiImageStreamSetImageFrameFlags @23
+    NuiImageStreamGetImageFrameFlags=K_NuiImageStreamGetImageFrameFlags @24
+    NuiGetAudioSource=K_NuiGetAudioSource                       @25
+    NuiSkeletonSetTrackedSkeletons=K_NuiSkeletonSetTrackedSkeletons @26
+    NuiSkeletonCalculateBoneOrientations=K_NuiSkeletonCalculateBoneOrientations @27
+    NuiCreateCoordinateMapperFromParameters=K_NuiCreateCoordinateMapperFromParameters @28
+    NuiCreateDepthFilter=K_NuiCreateDepthFilter                 @29

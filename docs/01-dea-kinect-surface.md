@@ -37,13 +37,16 @@ seated mode, no face tracking.
 |---|---|---|---|---|
 | 5 | `0x102181d4` | `0x1000ece1` | `(int *count)`; result `< 0` = error, `count == 0` = no sensor | `NuiGetSensorCount` |
 | 6 | `0x102181d8` | `0x1000ed27` | `(0, INuiSensor **out)` | `NuiCreateSensorByIndex` |
-| 9 | — | in `FUN_10019c30` | `(2, NULL, x, y, depth_mm << 3, long *cx, long *cy)` | `NuiImageGetColorPixelCoordinatesFromDepthPixelAtResolution` |
+| 9 | `0x102181e0` | `0x10019cf5` in `FUN_10019c30` | `(2, NULL, x, y, depth_mm << 3, long *cx, long *cy)` — 7 arguments | `NuiImageGetColorPixelCoordinatesFromDepthPixel` (corrected 2026-11-10; was given as `…AtResolution`, which is ordinal 10 with 8 arguments) |
 | 20 | — | in `FUN_100100d0`, once per new skeleton frame | `(NUI_SKELETON_FRAME *, params *)`, params = 0.5, 0.5, 0.5, 0.05, 0.04 | `NuiTransformSmooth` |
 | 22 | `0x102181e4` | `0x1000ebe3` in `FUN_1000ebd0` | `(callback, NULL)` at thread start, `(NULL, NULL)` at exit | `NuiSetDeviceStatusCallback` |
 
-The ordinal→name pairing is inferred from the call shapes, which are unambiguous, but **[open]**
-it has not been checked against the export table of a real `Kinect10.dll` (not available on the
-Mac). A replacement DLL must export these five at exactly these ordinals.
+**Confirmed 2026-11-10** against the export table of Microsoft's `Kinect10.dll` 1.8.0.595
+(`windows/docs/kinect10-exports.md`, which lists all 26 exports with their stack sizes): 5, 6, 20
+and 22 are as above; 9 is `NuiImageGetColorPixelCoordinatesFromDepthPixel` — the 7 arguments
+pushed at `0x10019cf5` match its 28-byte stack, not the 8-argument `…AtResolution` (ordinal 10).
+The import table lists them in the order 5, 6, 20, 9, 22. A replacement DLL must export these five
+at exactly these ordinals.
 
 ## 3. The sensor object (INuiSensor)
 
@@ -69,6 +72,17 @@ are for the 32-bit vtable.
 
 A replacement must lay the vtable out in the SDK's exact order, including the methods the game
 never calls (they can return `E_NOTIMPL`).
+
+**Image frames are held** **[DLL, `0x1000f400`]**: on a stream event the game first releases the
+frame it holds, then takes the next one and keeps it (texture locked and copied on its own wake
+event) until the next event of that stream. A replacement must keep a frame's buffer valid until
+it is released.
+
+**Seen in the running game (2026-11-10, replacement DLL log):** tracking is enabled with flag 2
+(title sets the tracked skeletons), and `NuiSkeletonSetTrackedSkeletons` is called after each
+skeleton frame with the ids `(0, id)` / `(id, 0)`, alternating every 2 s, where `id` is the
+tracked body's tracking id. In SENSOR CHECK and while playing, ordinal 9 is called for the four
+corners on every rendered frame (≈ 960 calls/s).
 
 **Image frames.** `NUI_IMAGE_FRAME` is 40 bytes **[DLL: copied as 5×8 bytes]**. The game reads
 `dwFrameNumber` at `+0x08` (a frame is uploaded only when this number changed) and
@@ -129,6 +143,18 @@ missing, 5 = sensor not ready / not powered, 6 = timeout. `NuiStatus()` results 
 `NuiSkeletonGetNextFrame` / `NuiImageStreamGetNextFrame` returning `0x80070015` or `0x8007048F`
 also sets state 4. `NuiGetSensorCount` failing gives 3, a count of 0 gives 4.
 
+**Recovery [DLL]:** the thread sets a global auto-reset event once at start and waits on it before
+every attempt to open the sensor; after any failure (states 3–6) it shuts the sensor down, releases
+it and waits on that event again. The device status callback (`0x1000ebb0`, `(hr, instance,
+unique, user)`, stdcall) does nothing but `SetEvent` on it, and only when `hr == S_OK` exactly. So
+a sensor that appears later is picked up only if the runtime calls the callback with `S_OK`.
+Observed with the replacement DLL: the game shows a sensor error while the sender is gone and
+clears it by itself after the callback (`windows/docs/no-sender.md`).
+
+**Elevation [DLL, `0x100100d0`]:** on each skeleton frame the game builds its own up vector from
+the integer elevation angle (stored at `natal + 0x20`) rather than using `vNormalToGravity`, and
+keeps the floor plane at `natal + 0x2c`.
+
 The test-mode text `[$KinectStatus]` (in `gamekdm.dll` and `arkkdm.dll`) shows this state.
 
 ## 6. Depth → colour registration **[DLL]**
@@ -143,12 +169,20 @@ In the virtual Kinect the two images come from the same camera, so the mapping i
 
 ## 7. Open points
 
-1. Export ordinals of the real `Kinect10.dll` (confirm §2). — Windows side, `dumpbin /exports`.
-2. Whether this implementation's `NuiTransformSmooth` equivalent (`l2k_smoother_apply`) matches
-   the real DLL's output. — Windows side, differential test against the real DLL.
+1. ~~Export ordinals of the real `Kinect10.dll`~~ — **resolved 2026-11-10** (§2; ordinal 9 corrected).
+2. ~~Whether `l2k_smoother_apply` matches the real DLL's `NuiTransformSmooth`~~ — **resolved
+   2026-11-10: it does**, to float precision, on 5 parameter sets with noise and jumps
+   (`windows/docs/smoothing.md`).
 3. What the game does with the depth and colour textures on screen, and whether it needs depth
    outside the player pixels. — port RE (shaders `gesture_depth`, `NatalCameraObjectRender…`).
 4. The quaternion applied to the joints (tilt compensation?) and how the judgement uses joint
    states. — port RE of `FUN_100103d0` and its callers.
 5. A second mode in `hid::Natal::Update` (`FUN_10012cb0`) replaces live skeletons with data read
    from a buffer of `0x140`-byte records — probably recorded motion for demos. — port RE.
+6. Sensor placement. The SENSOR CHECK skeleton panel removes the tilt (elevation angle) and its
+   position depends on the sensor height only; a 2.5 m player is centred with the sensor ≈ 1.4 m up
+   (measured in four placements). RESET ELEVATION ANGLE asks for `NuiCameraElevationSetAngle(27)`,
+   the maximum *upward* tilt (observed), while the cabinet's Kinect is about 2 m up (Danny),
+   probably on an angled mount: most likely the motor stops at its upper end and the game prints
+   the angle reached. The mount angle is not confirmed. —
+   `windows/docs/skeleton-panel.md`.
