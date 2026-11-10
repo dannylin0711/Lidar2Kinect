@@ -34,7 +34,9 @@ public final class L2KReceiver {
     }
 
     /// Every skeleton frame received, on the receiver's queue. `depth` / `color` are set on the first frame after
-    /// a whole image arrived and nil otherwise. Keep the work short or hand it off.
+    /// a whole image arrived and nil otherwise. When the sender goes away (BYE, or silence for L2K_PEER_TIMEOUT_MS)
+    /// one more frame with no bodies is handed out, so a consumer does not keep the last pose as a live player.
+    /// Keep the work short or hand it off.
     public var onFrame: ((L2KFrame) -> Void)?
     /// Called on the receiver's queue when the status changes, and once a second while receiving.
     public var onStatus: ((Status) -> Void)?
@@ -55,6 +57,7 @@ public final class L2KReceiver {
     private var activeSession: UInt32 = 0
     private var lastPacket: TimeInterval = 0
     private var lastFrameNumber: UInt32?
+    private var lastFrame: l2k_skeleton_frame?
     private var timer: DispatchSourceTimer?
     private let session = UInt32.random(in: 1...UInt32.max)
     private var seq: UInt32 = 0
@@ -149,6 +152,7 @@ public final class L2KReceiver {
         connections.removeAll()
         active = nil
         lastFrameNumber = nil
+        lastFrame = nil
         pendingDepth = nil
         pendingColor = nil
         resetAssemblers()
@@ -179,6 +183,13 @@ public final class L2KReceiver {
     }
 
     private func senderGone() {
+        if var empty = lastFrame {
+            withUnsafeMutableBytes(of: &empty.skeletons) { $0.initializeMemory(as: UInt8.self, repeating: 0) }
+            empty.frame_number &+= 1
+            empty.timestamp_us = L2K.nowMicroseconds()
+            lastFrame = nil
+            onFrame?(L2KFrame(skeleton: empty, depth: [UInt16](repeating: 0, count: L2K.depthWidth * L2K.depthHeight), color: nil, quadrant: 0))
+        }
         active = nil
         lastFrameNumber = nil
         pendingDepth = nil
@@ -282,6 +293,7 @@ public final class L2KReceiver {
                     status.lostFrames += Int(frame.frame_number &- last) - 1
                 }
                 lastFrameNumber = frame.frame_number
+                lastFrame = frame
                 status.skeletonFrames += 1
                 let out = L2KFrame(skeleton: frame, depth: pendingDepth, color: pendingColor, quadrant: 0)
                 pendingDepth = nil

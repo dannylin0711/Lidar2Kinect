@@ -439,12 +439,17 @@ final class L2KKitTests: XCTestCase {
         XCTAssertEqual(Set(numbers).count, numbers.count, "no frame twice")
         lock.unlock()
 
-        // the sender says BYE: the receiver goes back to listening
+        // the sender says BYE: the receiver hands out one frame with no bodies and goes back to listening
         let backToListening = expectation(description: "listening again")
         backToListening.assertForOverFulfill = false
+        let emptied = expectation(description: "a frame without bodies")
+        emptied.assertForOverFulfill = false
         receiver.onStatus = { if $0.state == .listening { backToListening.fulfill() } }
+        receiver.onFrame = { frame in
+            if frame.skeleton.slots.allSatisfy({ $0.state == 0 }), frame.depth?.allSatisfy({ $0 == 0 }) == true { emptied.fulfill() }
+        }
         session.sender.disconnect()
-        wait(for: [backToListening], timeout: 5)
+        wait(for: [backToListening, emptied], timeout: 5)
         session.stop()
         receiver.stop()
     }
