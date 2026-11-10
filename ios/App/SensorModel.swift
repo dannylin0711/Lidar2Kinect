@@ -7,11 +7,12 @@ import SwiftUI
 @MainActor
 final class SensorModel: ObservableObject {
     enum SourceChoice: String, CaseIterable, Identifiable {
-        case lidar, arkit, synthetic
+        case lidar, ultrawide, arkit, synthetic
         var id: String { rawValue }
         var title: String {
             switch self {
             case .lidar: return "LiDAR depth"
+            case .ultrawide: return "Ultra-wide"
             case .arkit: return "Body tracking"
             case .synthetic: return "Test figure"
             }
@@ -39,6 +40,10 @@ final class SensorModel: ObservableObject {
     @Published var preview: CGImage?
     @Published var skeleton: l2k_skeleton_frame?
     @Published var frameRate: Double = 0
+    /// How many times wider than the Kinect's image the colour preview is (1 = the Kinect's own image).
+    @Published var previewZoom: CGFloat = 1
+    /// The zoom of the picture currently shown (the depth preview is never zoomed).
+    @Published var shownZoom: CGFloat = 1
     @Published var diagnostics: [String] = []
     @Published var host: String { didSet { UserDefaults.standard.set(host, forKey: "l2kHost") } }
     @Published var port: String { didSet { UserDefaults.standard.set(port, forKey: "l2kPort") } }
@@ -61,6 +66,7 @@ final class SensorModel: ObservableObject {
         deviceSupport = []
         #else
         if VisionDepthSource.isSupported { sources.append(.lidar) }
+        if UltraWideSource.isSupported { sources.append(.ultrawide) }
         if ARKitBodySource.isSupported { sources.append(.arkit) }
         deviceSupport = L2KDeviceSupport.report()
         #endif
@@ -87,17 +93,45 @@ final class SensorModel: ObservableObject {
         }
         discovery.onChange = { [weak self] receivers in self?.receivers = receivers }
         discovery.start()
-        previewer.onPreview = { [weak self] image, skeleton, rate, status, diagnostics in
+        previewer.onPreview = { [weak self] image, zoom, skeleton, rate, status, diagnostics in
             guard let self else { return }
             self.preview = image
+            self.shownZoom = zoom
             self.skeleton = skeleton
             self.frameRate = rate
             self.sourceStatus = status
             self.diagnostics = diagnostics
+            self.logIfAsked(skeleton: skeleton, rate: rate)
         }
         applyPreviewMode()
         startSource()
         if UserDefaults.standard.bool(forKey: "l2kAutoConnect"), !host.isEmpty { connect() }
+        if UserDefaults.standard.bool(forKey: "l2kLog") {
+            print("L2K-LOG sources: \(availableSources.map(\.rawValue).joined(separator: ",")) chosen: \(sourceChoice.rawValue)")
+            for item in deviceSupport { print("L2K-LOG support \(item.supported ? "yes" : "no ") \(item.label)") }
+            #if !targetEnvironment(simulator)
+            for line in L2KDeviceSupport.videoFormats() { print("L2K-LOG " + line) }
+            #endif
+            fflush(stdout)
+        }
+    }
+
+    /// -l2kLog 1: print the status and the diagnostics every two seconds (read with `devicectl ... launch --console`).
+    private var lastLog: TimeInterval = 0
+    private func logIfAsked(skeleton: l2k_skeleton_frame, rate: Double) {
+        guard UserDefaults.standard.bool(forKey: "l2kLog") else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastLog >= 2 else { return }
+        lastLog = now
+        var lines = ["L2K-LOG source=\(sourceChoice.rawValue) upper=\(upperBodyOnly) out=\(String(format: "%.0f", rate))fps tracked=\(skeleton.trackedSkeletons.count) tilt=\(String(format: "%.0f", skeleton.elevationDegrees)) floor=\(String(format: "%.2f", skeleton.floor_plane.w)) | \(sourceStatus)"]
+        if let body = skeleton.trackedSkeletons.first?.skeleton {
+            let h = body.position(of: .head), l = body.position(of: .handLeft), r = body.position(of: .handRight), f = body.position(of: .footLeft)
+            lines.append(String(format: "L2K-LOG   head (%.2f %.2f %.2f) handL (%.2f %.2f %.2f) handR (%.2f %.2f %.2f) footL (%.2f %.2f %.2f) states %@",
+                                h.x, h.y, h.z, l.x, l.y, l.z, r.x, r.y, r.z, f.x, f.y, f.z, body.jointStates.map(String.init).joined()))
+        }
+        lines += diagnostics.map { "L2K-LOG   " + $0 }
+        print(lines.joined(separator: "\n"))
+        fflush(stdout)
     }
 
     func selectSource(_ choice: SourceChoice) {
@@ -113,7 +147,11 @@ final class SensorModel: ObservableObject {
         source = SyntheticSource(players: players)
         #else
         switch sourceChoice {
-        case .lidar: source = VisionDepthSource()
+        case .lidar:
+            let lidar = VisionDepthSource()
+            lidar.forceVisionMask = UserDefaults.standard.bool(forKey: "l2kVisionMask") // -l2kVisionMask 1
+            source = lidar
+        case .ultrawide: source = UltraWideSource()
         case .arkit: source = ARKitBodySource()
         case .synthetic: source = SyntheticSource(players: players)
         }
@@ -121,6 +159,9 @@ final class SensorModel: ObservableObject {
         previewer.source = source
         previewer.context = session.pipeline.ciContext
         session.onFrame = { [previewer] frame in previewer.handle(frame) }
+        // The ultra-wide camera sees far more than the Kinect's image: show twice the Kinect's view.
+        previewZoom = sourceChoice == .ultrawide ? 2 : 1
+        applyPreviewMode()
         do {
             try session.start(source)
             sourceError = nil
@@ -134,6 +175,7 @@ final class SensorModel: ObservableObject {
         session.localWantsColor = previewMode == .color
         session.localWantsDepth = previewMode == .depth
         session.localWantsDepthPreview = previewMode == .depth
+        session.localColorPreviewZoom = previewMode == .color ? Float(previewZoom) : 1
         previewer.mode = previewMode
     }
 
@@ -155,7 +197,7 @@ final class SensorModel: ObservableObject {
 /// Turns frames into preview images on the capture queue, at most 15 times per second.
 final class Previewer {
     /// Called on the main queue.
-    var onPreview: ((CGImage?, l2k_skeleton_frame, Double, String, [String]) -> Void)?
+    var onPreview: ((CGImage?, CGFloat, l2k_skeleton_frame, Double, String, [String]) -> Void)?
     var context: CIContext?
     weak var source: L2KSource?
 
@@ -181,7 +223,11 @@ final class Previewer {
             rateStart = now
             rateCount = 0
         }
-        guard now - lastPreview >= 1.0 / 15 else { return }
+        // Only the frames the session made a picture for (its local rate) can be shown. Showing the ones in between
+        // blanked the preview: it flashed.
+        let mode = mode
+        let hasPicture = mode == .color ? (frame.color != nil || frame.colorPreview != nil) : (frame.depth != nil || frame.depthPreview != nil)
+        guard hasPicture else { return }
         // Building the picture must never hold up the capture queue: it happens on its own queue, and a frame
         // that arrives while the previous picture is still being built is not shown.
         lock.lock()
@@ -190,13 +236,19 @@ final class Previewer {
         lock.unlock()
         guard !busy else { return }
         lastPreview = now
-        let mode = mode, context = context, rate = rate
+        let context = context, rate = rate
         let status = source?.statusText ?? "", diagnostics = source?.diagnostics ?? []
         previewQueue.async { [weak self] in
             var image: CGImage?
+            var zoom: CGFloat = 1
             switch mode {
             case .color:
-                if let color = frame.color { image = context?.createCGImage(color, from: color.extent) }
+                if let wide = frame.colorPreview {
+                    image = context?.createCGImage(wide, from: wide.extent)
+                    zoom = CGFloat(frame.colorPreviewZoom)
+                } else if let color = frame.color {
+                    image = context?.createCGImage(color, from: color.extent)
+                }
             case .depth:
                 // What the sensor reports when it has a depth map; else the image that would be sent (a drawn figure).
                 if let raw = frame.depthPreview {
@@ -206,7 +258,7 @@ final class Previewer {
                 }
             }
             let skeleton = frame.skeleton
-            DispatchQueue.main.async { self?.onPreview?(image, skeleton, rate, status, diagnostics) }
+            DispatchQueue.main.async { self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics) }
             guard let self else { return }
             self.lock.lock()
             self.building = false

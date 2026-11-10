@@ -26,6 +26,20 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-10 (late night) — first runs on the iPhone, ultra-wide source (Apple side)
+
+- Signed builds now work from the command line (`xcodebuild -allowProvisioningUpdates`, a profile
+  for `dev.latowolf.lidar2kinect` exists). The app is installed on Danny's iPhone 17 Pro; its
+  diagnostics are read with `devicectl device process launch --console … -- <bundle> -l2kLog 1`.
+- LiDAR source on the device: depth map present once camera tracking is normal, person mask from
+  ARKit, 30 processed frames/s. No person was in view, so the lifted skeleton is still unseen.
+- New `UltraWideSource` (app: "Ultra-wide"): rear ultra-wide camera + Vision 3D pose, no LiDAR
+  (`docs/03` §7). On the device: 30 fps, a body tracked. Its accuracy has not been assessed.
+- App 0.5.0: the ultra-wide option; a colour preview zoomed out to twice the Kinect's view for it;
+  `-l2kLog 1` console logging; `-l2kVisionMask 1`. Fixed in passing: the preview flashed, because
+  frames without a picture (between the 15-per-second preview frames) blanked it.
+- Vision's left/right confirmed as the person's own on a picture of dancers facing the viewer.
+
 ## 2026-11-10 (night) — device facts, LiDAR depth source rebuilt on Vision (Apple side)
 
 - Danny ran 0.3.0 on an iPad Pro (M2) and an iPhone 17 Pro: no skeleton, no depth. The "This

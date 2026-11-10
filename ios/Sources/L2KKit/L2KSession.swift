@@ -16,6 +16,8 @@ public final class L2KSession {
     public var localWantsColor = false
     /// The local consumer wants `L2KFrame.depthPreview` (the raw depth map, for showing what the sensor reports).
     public var localWantsDepthPreview = false
+    /// Above 1: the local consumer also gets `L2KFrame.colorPreview`, a view this many times wider than the Kinect's.
+    public var localColorPreviewZoom: Float = 1
     /// Output rate in frames per second. A Kinect delivers 30.
     public var outputRate: Double = 30
     /// Name announced to receivers.
@@ -72,7 +74,8 @@ public final class L2KSession {
                                      wantDepth: sendDepth || (localWantsDepth && localDue),
                                      wantColor: sendColor || (localWantsColor && localDue),
                                      playersOnly: wanted.depthMode == UInt8(L2K_DEPTH_MODE_PLAYERS),
-                                     wantDepthPreview: localWantsDepthPreview && localDue)
+                                     wantDepthPreview: localWantsDepthPreview && localDue,
+                                     colorPreviewZoom: (localWantsColor && localDue) ? localColorPreviewZoom : 1)
         if wanted.streams != 0 {
             var jpeg: Data?
             if sendColor, let color = frame.color {

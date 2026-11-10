@@ -105,6 +105,72 @@ final class VisionBodyDetector {
     }
 }
 
+/// One joint from Vision's 3D body pose: where it is in the buffer (normalised, origin top-left) and how far along the
+/// optical axis (metres).
+struct VisionJoint3D {
+    var source: Int
+    var u: Float
+    var v: Float
+    var depth: Float
+}
+
+/// 3D body pose from the camera image alone (no depth sensor). Vision estimates the joints in metres - with an assumed
+/// body height when it has no depth - for one person.
+///
+/// Only two things are taken from Vision: each joint's position in the image and its distance along the optical axis.
+/// The 3D point is then rebuilt with the camera's own intrinsics, so it does not depend on the axis conventions of
+/// Vision's camera space, and it lines up with the camera image exactly.
+final class VisionBody3DDetector {
+    private let request = VNDetectHumanBodyPose3DRequest()
+    private(set) var lastError: String?
+    /// The body height Vision worked with (metres) and whether it measured it or assumed it.
+    private(set) var lastHeight: Float = 0
+    private(set) var lastHeightMeasured = false
+
+    /// Vision's left / right are taken to be the person's own - to be confirmed on a device.
+    private static let map: [(VNHumanBodyPose3DObservation.JointName, Int)] = [
+        (.root, Int(L2K_SRC_PELVIS)), (.centerShoulder, Int(L2K_SRC_NECK)), (.centerHead, Int(L2K_SRC_HEAD)),
+        (.leftShoulder, Int(L2K_SRC_SHOULDER_LEFT)), (.leftElbow, Int(L2K_SRC_ELBOW_LEFT)), (.leftWrist, Int(L2K_SRC_WRIST_LEFT)),
+        (.rightShoulder, Int(L2K_SRC_SHOULDER_RIGHT)), (.rightElbow, Int(L2K_SRC_ELBOW_RIGHT)), (.rightWrist, Int(L2K_SRC_WRIST_RIGHT)),
+        (.leftHip, Int(L2K_SRC_HIP_LEFT)), (.leftKnee, Int(L2K_SRC_KNEE_LEFT)), (.leftAnkle, Int(L2K_SRC_ANKLE_LEFT)),
+        (.rightHip, Int(L2K_SRC_HIP_RIGHT)), (.rightKnee, Int(L2K_SRC_KNEE_RIGHT)), (.rightAnkle, Int(L2K_SRC_ANKLE_RIGHT)),
+    ]
+
+    /// The joints of the person Vision finds in `image` (empty if none), for a device rolled by `quadrant`.
+    func detect(in image: CVPixelBuffer, quadrant: Int32) -> [VisionJoint3D] {
+        let handler = VNImageRequestHandler(cvPixelBuffer: image, orientation: VisionOrientation.orientation(forQuadrant: quadrant), options: [:])
+        do {
+            try handler.perform([request])
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            return []
+        }
+        guard let observation = request.results?.first else { return [] }
+        lastHeight = observation.bodyHeight
+        lastHeightMeasured = observation.heightEstimation == .measured
+        var joints: [VisionJoint3D] = []
+        for (name, source) in Self.map {
+            guard let point = try? observation.pointInImage(name),
+                  let position = try? observation.cameraRelativePosition(name) else { continue }
+            let depth = abs(position.columns.3.z)
+            guard depth.isFinite, depth > 0.05 else { continue }
+            let b = VisionOrientation.bufferPoint(fromVision: point.location, quadrant: quadrant)
+            joints.append(VisionJoint3D(source: source, u: b.u, v: b.v, depth: depth))
+        }
+        return joints
+    }
+
+    /// Place the joints in source camera space (+x image right, +y image up, the camera looks along -z).
+    static func place(_ joints: [VisionJoint3D], camera: l2k_src_camera, into body: inout l2k_src_body) {
+        for joint in joints {
+            let x = (joint.u - camera.cxn) / camera.fxn * joint.depth
+            let y = -(joint.v - camera.cyn) / camera.fyn * joint.depth
+            body.set(joint.source, SIMD3(x, y, -joint.depth), confidence: 2)
+        }
+    }
+}
+
 /// Person mask of a camera buffer (kCVPixelFormatType_OneComponent8, in buffer coordinates), for devices where ARKit
 /// gives no segmentation together with the depth map.
 final class VisionPersonMask {

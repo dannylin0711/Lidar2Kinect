@@ -211,6 +211,50 @@ final class L2KKitTests: XCTestCase {
         }
     }
 
+    /// The zoomed-out preview shows the Kinect's own image as its central part.
+    func testZoomedColourPreview() throws {
+        let source = SyntheticSource(players: 1)
+        let pipeline = L2KPipeline()
+        let frame = pipeline.process(source.frame(at: 0.2, timestamp: 1), kind: source.kind, wantDepth: false, wantColor: true,
+                                     playersOnly: true, colorPreviewZoom: 2)
+        let wide = try XCTUnwrap(frame.colorPreview)
+        XCTAssertEqual(frame.colorPreviewZoom, 2)
+        XCTAssertEqual(wide.extent, CGRect(x: 0, y: 0, width: 640, height: 480))
+        var pixels = [UInt8](repeating: 0, count: 640 * 480 * 4)
+        pipeline.ciContext.render(wide, toBitmap: &pixels, rowBytes: 640 * 4, bounds: wide.extent,
+                                  format: .BGRA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        func red(_ x: Int, _ y: Int) -> UInt8 { pixels[(y * 640 + x) * 4 + 2] }
+        func green(_ x: Int, _ y: Int) -> UInt8 { pixels[(y * 640 + x) * 4 + 1] }
+        // The source's red corner mark sits at the Kinect image's top-right corner: now the inner frame's (480, 120).
+        XCTAssertGreaterThan(red(478, 122), 200)
+        XCTAssertLessThan(green(478, 122), 60)
+        // Outside the source image (this source is exactly as wide as the Kinect) there is nothing: black.
+        XCTAssertEqual(red(100, 60), 0)
+        XCTAssertEqual(red(600, 440), 0)
+        // Inside, the picture.
+        XCTAssertGreaterThan(red(320, 240), 10)
+    }
+
+    /// Runs Vision's body pose on a picture if one is given (L2K_TEST_IMAGE=/path/to.png) and prints what it finds.
+    func testVisionOnAPicture() throws {
+        guard let path = ProcessInfo.processInfo.environment["L2K_TEST_IMAGE"] else { throw XCTSkip("no L2K_TEST_IMAGE") }
+        let image = try XCTUnwrap(CIImage(contentsOf: URL(fileURLWithPath: path)))
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(nil, Int(image.extent.width), Int(image.extent.height), kCVPixelFormatType_32BGRA,
+                            [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary, &buffer)
+        let pixels = try XCTUnwrap(buffer)
+        CIContext().render(image, to: pixels)
+        let people = VisionBodyDetector().detect(in: pixels, quadrant: 0)
+        print("L2K-VISION 2D people: \(people.count)")
+        for person in people {
+            print("L2K-VISION 2D " + person.joints.map { String(format: "%d:(%.2f,%.2f)", $0.source, $0.u, $0.v) }.joined(separator: " "))
+        }
+        let detector = VisionBody3DDetector()
+        let joints = detector.detect(in: pixels, quadrant: 0)
+        print("L2K-VISION 3D joints: \(joints.count) height \(detector.lastHeight) error \(detector.lastError ?? "none")")
+        print("L2K-VISION 3D " + joints.map { String(format: "%d:(%.2f,%.2f,%.2fm)", $0.source, $0.u, $0.v, $0.depth) }.joined(separator: " "))
+    }
+
     func testPersonTrackerKeepsIdentities() {
         var tracker = VisionPersonTracker()
         func person(_ x: Float) -> VisionPerson { VisionPerson(joints: [], centre: SIMD2(x, 0.5), size: 0.2) }

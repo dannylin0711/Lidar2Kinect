@@ -36,6 +36,8 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
 
     /// Frames are processed at most this often (a Kinect delivers 30 per second).
     public var processingRate: Double = 30
+    /// Take the person mask from Vision even where ARKit offers one together with the depth map.
+    public var forceVisionMask = false
 
     public static var isSupported: Bool {
         ARWorldTrackingConfiguration.isSupported && ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
@@ -61,7 +63,7 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
         configuration.worldAlignment = .gravity
         var semantics: ARConfiguration.FrameSemantics = [.sceneDepth]
         // ARKit's own person mask when it can be had together with the depth map; Vision's otherwise.
-        arkitMask = ARWorldTrackingConfiguration.supportsFrameSemantics([.sceneDepth, .personSegmentationWithDepth])
+        arkitMask = !forceVisionMask && ARWorldTrackingConfiguration.supportsFrameSemantics([.sceneDepth, .personSegmentationWithDepth])
         if arkitMask { semantics.insert(.personSegmentationWithDepth) }
         configuration.frameSemantics = semantics
         setStatus("Starting ARKit", diagnostics: ["Starting ARKit world tracking, person mask from \(arkitMask ? "ARKit" : "Vision")"])
@@ -199,8 +201,9 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
         if let depth {
             lines.append(Self.describeDepth(depth))
         } else {
-            lines.append("Depth map: none in this frame")
+            lines.append("Depth map: none in this frame (sceneDepth \(frame.sceneDepth == nil ? "nil" : "set"), smoothed \(frame.smoothedSceneDepth == nil ? "nil" : "set"), estimated \(frame.estimatedDepthData == nil ? "nil" : "set"))")
         }
+        lines.append("Camera tracking: \(Self.describe(frame.camera.trackingState)), semantics asked: \(session.configuration?.frameSemantics.rawValue ?? 0)")
         if let mask {
             lines.append("Person mask (\(arkitMask ? "ARKit" : "Vision")): " + Self.describeMask(mask))
         } else {
@@ -210,6 +213,21 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
         if !lifted.isEmpty { lines.append("Joints placed per person: " + lifted.map(String.init).joined(separator: ", ") + " of 15") }
         if let lastError { lines.append("Last ARKit error: \(lastError)") }
         setStatus(parts.joined(separator: " · "), diagnostics: lines)
+    }
+
+    private static func describe(_ state: ARCamera.TrackingState) -> String {
+        switch state {
+        case .normal: return "normal"
+        case .notAvailable: return "not available"
+        case .limited(let reason):
+            switch reason {
+            case .initializing: return "limited (initializing)"
+            case .excessiveMotion: return "limited (excessive motion)"
+            case .insufficientFeatures: return "limited (insufficient features)"
+            case .relocalizing: return "limited (relocalizing)"
+            @unknown default: return "limited"
+            }
+        }
     }
 
     private static func describeDepth(_ depth: CVPixelBuffer) -> String {
@@ -249,6 +267,17 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
 
 /// What this device's ARKit can do, for the app's diagnostics. Facts read from ARKit at run time.
 public enum L2KDeviceSupport {
+    /// The camera formats ARKit offers for world tracking and for body tracking, one line each.
+    public static func videoFormats() -> [String] {
+        func describe(_ label: String, _ formats: [ARConfiguration.VideoFormat]) -> [String] {
+            formats.map { f in
+                "format \(label): \(f.captureDeviceType.rawValue) \(Int(f.imageResolution.width))x\(Int(f.imageResolution.height)) @\(f.framesPerSecond)"
+            }
+        }
+        return describe("world", ARWorldTrackingConfiguration.supportedVideoFormats)
+            + describe("body", ARBodyTrackingConfiguration.supportedVideoFormats)
+    }
+
     public static func report() -> [(label: String, supported: Bool)] {
         [
             ("World tracking + LiDAR depth", ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)),

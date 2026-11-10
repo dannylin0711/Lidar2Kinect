@@ -6,6 +6,8 @@ import SwiftUI
 struct SensorPreview: View {
     let image: CGImage?
     let skeleton: l2k_skeleton_frame?
+    /// The picture shows this many times the Kinect's field of view; the Kinect's own image is the framed middle.
+    var zoom: CGFloat = 1
 
     private static let slotColors: [Color] = [.green, .cyan, .yellow, .pink, .purple, .mint]
 
@@ -25,6 +27,12 @@ struct SensorPreview: View {
             if let image {
                 context.draw(Image(decorative: image, scale: 1), in: frame)
             }
+            if zoom > 1 {
+                // what the Kinect's own image covers
+                let inner = CGRect(x: size.width * (0.5 - 0.5 / zoom), y: size.height * (0.5 - 0.5 / zoom),
+                                   width: size.width / zoom, height: size.height / zoom)
+                context.stroke(Path(inner), with: .color(.white.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
+            }
             guard let skeleton else { return }
             for (slot, body) in skeleton.trackedSkeletons {
                 let color = Self.slotColors[slot % Self.slotColors.count]
@@ -34,7 +42,9 @@ struct SensorPreview: View {
                 let points: [CGPoint?] = positions.map { p in
                     var u: Float = 0, v: Float = 0
                     guard l2k_skeleton_to_depth_pixel(p, 320, 240, &u, &v) == 1 else { return nil }
-                    return CGPoint(x: CGFloat(u) / 320 * size.width, y: CGFloat(v) / 240 * size.height)
+                    // a zoomed-out picture shrinks everything towards the centre
+                    return CGPoint(x: (0.5 + (CGFloat(u) / 320 - 0.5) / zoom) * size.width,
+                                   y: (0.5 + (CGFloat(v) / 240 - 0.5) / zoom) * size.height)
                 }
                 for (a, b) in KinectJoint.bones {
                     guard let pa = points[a.rawValue], let pb = points[b.rawValue] else { continue }

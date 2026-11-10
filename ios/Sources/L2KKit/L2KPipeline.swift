@@ -17,6 +17,10 @@ public struct L2KFrame {
     /// For a local preview only: what the depth sensor reports, seen through the virtual Kinect camera, before the
     /// Kinect range limits and the players-only setting are applied. nil when not requested or the source has no depth map.
     public var depthPreview: L2KDepthPreview?
+    /// For a local preview only: the camera image through a virtual camera `colorPreviewZoom` times wider than the
+    /// Kinect's (640x480; the Kinect's own image is its central 1/zoom). nil unless a zoom above 1 was requested.
+    public var colorPreview: CIImage?
+    public var colorPreviewZoom: Float = 1
 }
 
 /// The raw depth map resampled to the virtual Kinect image (320x240).
@@ -55,7 +59,7 @@ public final class L2KPipeline {
     /// Build the Kinect frame for one source frame. Call from one queue only.
     /// - Parameter playersOnly: keep depth only on player pixels (L2K_DEPTH_MODE_PLAYERS).
     public func process(_ source: L2KSourceFrame, kind: UInt8, wantDepth: Bool, wantColor: Bool, playersOnly: Bool,
-                        wantDepthPreview: Bool = false) -> L2KFrame {
+                        wantDepthPreview: Bool = false, colorPreviewZoom: Float = 1) -> L2KFrame {
         let q = updateQuadrant(up: source.upCamera)
         mapper.params.upper_body = upperBodyMode ? 1 : 0
         var skeleton = l2k_skeleton_frame()
@@ -73,6 +77,10 @@ public final class L2KPipeline {
         }
         if wantDepthPreview {
             frame.depthPreview = depthPreview(source, quadrant: q)
+        }
+        if colorPreviewZoom > 1, let image = source.image {
+            frame.colorPreview = colorImage(image, camera: source.camera, quadrant: q, zoom: colorPreviewZoom)
+            frame.colorPreviewZoom = colorPreviewZoom
         }
         return frame
     }
@@ -212,7 +220,9 @@ public final class L2KPipeline {
 
     /// Crop / rotate / mirror the camera image into the virtual Kinect's colour image.
     /// The two cameras share their centre and differ by a roll of quarter turns, so the mapping is affine.
-    private func colorImage(_ buffer: CVPixelBuffer, camera: l2k_src_camera, quadrant: Int32) -> CIImage {
+    /// `zoom` > 1 widens the view around the same centre (for previews): the virtual image then spans
+    /// zoom times the Kinect's field of view in tangent space.
+    private func colorImage(_ buffer: CVPixelBuffer, camera: l2k_src_camera, quadrant: Int32, zoom: Float = 1) -> CIImage {
         let image = CIImage(cvPixelBuffer: buffer)
         let sw = CGFloat(CVPixelBufferGetWidth(buffer)), sh = CGFloat(CVPixelBufferGetHeight(buffer))
         let width = CGFloat(L2K_COLOR_WIDTH), height = CGFloat(L2K_COLOR_HEIGHT)
@@ -224,7 +234,8 @@ public final class L2KPipeline {
             l2k_virtual_to_source(&cam, quadrant, un, vn, &sx, &sy)
             return CGPoint(x: CGFloat(sx) * sw, y: (1 - CGFloat(sy)) * sh)
         }
-        let p00 = sourcePoint(0, 0), p10 = sourcePoint(1, 0), p01 = sourcePoint(0, 1)
+        let lo = 0.5 - zoom / 2, hi = 0.5 + zoom / 2 // the mapping is linear, so it extends outside 0...1
+        let p00 = sourcePoint(lo, lo), p10 = sourcePoint(hi, lo), p01 = sourcePoint(lo, hi)
         // Solve T(p00) = (0,h), T(p10) = (w,h), T(p01) = (0,0) for the affine T.
         let e1 = CGPoint(x: p10.x - p00.x, y: p10.y - p00.y), e2 = CGPoint(x: p01.x - p00.x, y: p01.y - p00.y)
         let det = e1.x * e2.y - e2.x * e1.y

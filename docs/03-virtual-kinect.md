@@ -151,6 +151,7 @@ ARKit alone therefore cannot give a body and LiDAR depth in the same session.
 | Source | Where the body comes from | Bodies | Depth image | Status |
 |---|---|---|---|---|
 | LiDAR depth (`VisionDepthSource`) | ARKit world tracking for the image, intrinsics, gravity and the LiDAR depth map; **Vision** 2D body pose on the camera image, lifted with the depth map | up to 2 | the LiDAR depth map; players from ARKit's person mask where it combines with scene depth, else Vision's | written 2026-11-10; coordinate handling tested on the Mac; **not yet run on a device** |
+| Ultra-wide (`UltraWideSource`) | the rear ultra-wide camera on a plain capture session (no ARKit, no LiDAR); **Vision 3D body pose** on the image; gravity from the motion sensors | 1 | none measured: Vision's person mask at the body's distance | written 2026-11-10; ran on an iPhone 17 Pro at 30 fps with a body seen; accuracy not assessed |
 | Body tracking (`ARKitBodySource`) | ARKit's model-based 3D skeleton | 1 | no depth map on these devices: drawn from the skeleton | ran on Danny's devices without a skeleton appearing; cause not established |
 | Synthetic figure (`SyntheticSource`, `l2k_synth_body`) | generated | 1–2 | drawn from the skeleton | working; used by tests, the simulator and `l2k_fake_sender` |
 
@@ -168,3 +169,25 @@ Consequences: the skeleton is metric and the depth image is real; a joint hidden
 gets the depth of what hides it; the head joint is placed from the ears or the nose. Vision's
 left and right are taken to be the person's own — the app draws the left side orange and the
 right side blue so this can be checked at a glance on a device.
+
+**Ultra-wide.** The LiDAR covers only the normal wide camera's view, and ARKit offers only that
+camera (every world- and body-tracking video format on the iPhone 17 Pro is the wide-angle camera).
+The ultra-wide camera measured 105° × 73° at 1280×720, against the Kinect's 58.5° × 45.6°, so a
+standing person fits from about a metre away. Vision's 3D request gives each joint's position in
+the image and its distance along the optical axis; the 3D point is rebuilt with the camera's own
+intrinsics (`VisionBody3DDetector.place`), so it does not depend on Vision's axis conventions.
+Vision assumes a body height of 1.80 m when it cannot measure one, so distances are right in
+proportion but only roughly in scale. The Kinect images still have the Kinect's field of view:
+they show the middle of what the camera sees, while the skeleton carries every joint (those outside
+the image set the clipped-edge bits). The app's colour preview zooms out to twice the Kinect's view
+and frames the Kinect's own image with a dashed rectangle.
+
+**Measured on the iPhone 17 Pro (2026-11-10).**
+
+- ARKit: world tracking + LiDAR depth yes, + person mask yes, + 2D body no; 3D body tracking yes,
+  but with neither depth nor mask. `sceneDepth` is nil while camera tracking is still "limited"
+  (the first seconds, or a phone lying still) and appears once tracking is normal: 256×192, 100 % valid.
+- LiDAR source: 60 ARKit frames/s, 30 processed, Vision 2D pose 10–20 ms.
+- Ultra-wide source: 30 frames/s, Vision 3D pose 17 ms, 23 ms with the person mask.
+- Vision's left / right are the person's own: on a frame of five dancers facing the viewer, every
+  "left" shoulder and hip is on the image's right (`testVisionOnAPicture`).

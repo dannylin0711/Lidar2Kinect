@@ -28,10 +28,11 @@ struct ContentView: View {
 
     private var previewColumn: some View {
         VStack(spacing: 8) {
-            SensorPreview(image: model.preview, skeleton: model.skeleton)
+            SensorPreview(image: model.preview, skeleton: model.skeleton, zoom: model.shownZoom)
             Text(model.previewMode == .depth
                  ? "Depth: bright = near, blue = outside the Kinect's 0.8–4 m, green = person, black = no reading. Skeleton: orange = your left, blue = your right."
-                 : "Skeleton: orange = your left side, blue = your right side.")
+                 : "Skeleton: orange = your left side, blue = your right side."
+                    + (model.shownZoom > 1 ? " The dashed frame is what the game's Kinect image shows." : ""))
                 .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             Picker("Preview", selection: $model.previewMode) {
                 ForEach(SensorModel.PreviewMode.allCases) { Text($0.title).tag($0) }
