@@ -43,6 +43,11 @@ Details and measurements: `windows/STATUS.md`.
   simulator, the 3D names against Apple's motion-capture documentation. All present.
 - Not established: why the 3D body-tracking source showed no skeleton on the devices.
 - **Nothing in this entry has run on a device yet.**
+- Simulator test (new `L2K iPhone 17 Pro` simulator, synthetic figure → `l2k_dump` on the Mac): two
+  players with the colour preview, and one player in upper-body mode with the depth preview, both a
+  steady 30 fps on all three streams with nothing lost — once the Mac was idle. Under heavy load the
+  rate collapsed, which exposed that the preview picture was built on the capture queue. App 0.4.1:
+  the preview is built on its own queue and preview-only images are made 15 times a second.
 
 ## 2026-11-10 (evening) — upper-body mode (Apple side)
 

@@ -73,6 +73,7 @@ final class SensorModel: ObservableObject {
         host = defaults.string(forKey: "l2kHost") ?? ""
         port = defaults.string(forKey: "l2kPort") ?? String(L2K.defaultPort)
         players = max(1, defaults.integer(forKey: "l2kPlayers"))
+        previewMode = PreviewMode(rawValue: defaults.string(forKey: "l2kPreview") ?? "") ?? .color // -l2kPreview depth
         upperBodyOnly = defaults.bool(forKey: "l2kUpperBody") // also a launch argument: -l2kUpperBody 1
         session.pipeline.upperBodyMode = upperBodyOnly
         session.deviceName = UIDevice.current.name
@@ -165,6 +166,8 @@ final class Previewer {
         set { lock.lock(); _mode = newValue; lock.unlock() }
     }
 
+    private let previewQueue = DispatchQueue(label: "l2k.preview", qos: .userInitiated)
+    private var building = false
     private var lastPreview: TimeInterval = 0
     private var rateStart: TimeInterval = 0
     private var rateCount = 0
@@ -179,21 +182,36 @@ final class Previewer {
             rateCount = 0
         }
         guard now - lastPreview >= 1.0 / 15 else { return }
+        // Building the picture must never hold up the capture queue: it happens on its own queue, and a frame
+        // that arrives while the previous picture is still being built is not shown.
+        lock.lock()
+        let busy = building
+        if !busy { building = true }
+        lock.unlock()
+        guard !busy else { return }
         lastPreview = now
-        var image: CGImage?
-        switch mode {
-        case .color:
-            if let color = frame.color { image = context?.createCGImage(color, from: color.extent) }
-        case .depth:
-            // What the sensor reports when it has a depth map; else the image that would be sent (a drawn figure).
-            if let raw = frame.depthPreview {
-                image = Self.rawDepthImage(raw)
-            } else if let depth = frame.depth {
-                image = Self.depthImage(depth)
+        let mode = mode, context = context, rate = rate
+        let status = source?.statusText ?? "", diagnostics = source?.diagnostics ?? []
+        previewQueue.async { [weak self] in
+            var image: CGImage?
+            switch mode {
+            case .color:
+                if let color = frame.color { image = context?.createCGImage(color, from: color.extent) }
+            case .depth:
+                // What the sensor reports when it has a depth map; else the image that would be sent (a drawn figure).
+                if let raw = frame.depthPreview {
+                    image = Self.rawDepthImage(raw)
+                } else if let depth = frame.depth {
+                    image = Self.depthImage(depth)
+                }
             }
+            let skeleton = frame.skeleton
+            DispatchQueue.main.async { self?.onPreview?(image, skeleton, rate, status, diagnostics) }
+            guard let self else { return }
+            self.lock.lock()
+            self.building = false
+            self.lock.unlock()
         }
-        let skeleton = frame.skeleton, rate = rate, status = source?.statusText ?? "", diagnostics = source?.diagnostics ?? []
-        DispatchQueue.main.async { [weak self] in self?.onPreview?(image, skeleton, rate, status, diagnostics) }
     }
 
     /// The raw depth map: grey by distance (near = bright) inside the Kinect's 0.8-4 m range, blue outside it

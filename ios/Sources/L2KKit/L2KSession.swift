@@ -23,7 +23,11 @@ public final class L2KSession {
     /// JPEG quality used when the receiver does not ask for one.
     public var defaultJPEGQuality = 0.6
 
+    /// How often per second the local-only images (`localWants…`) are produced.
+    public var localRate: Double = 15
+
     private var lastOutput: TimeInterval = 0
+    private var lastLocal: TimeInterval = 0
 
     public init() {}
 
@@ -61,11 +65,14 @@ public final class L2KSession {
         let wanted = sender.wanted
         let sendDepth = wanted.streams & L2K.streamDepth != 0
         let sendColor = wanted.streams & L2K.streamColor != 0
+        // Images only the local consumer wants (a preview) are made at the local rate, not for every frame.
+        let localDue = sourceFrame.timestamp - lastLocal >= (1 / localRate) * 0.9
+        if localDue { lastLocal = sourceFrame.timestamp }
         let frame = pipeline.process(sourceFrame, kind: source.kind,
-                                     wantDepth: sendDepth || localWantsDepth,
-                                     wantColor: sendColor || localWantsColor,
+                                     wantDepth: sendDepth || (localWantsDepth && localDue),
+                                     wantColor: sendColor || (localWantsColor && localDue),
                                      playersOnly: wanted.depthMode == UInt8(L2K_DEPTH_MODE_PLAYERS),
-                                     wantDepthPreview: localWantsDepthPreview)
+                                     wantDepthPreview: localWantsDepthPreview && localDue)
         if wanted.streams != 0 {
             var jpeg: Data?
             if sendColor, let color = frame.color {
