@@ -26,6 +26,20 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-10 (late night, 3) — hands lost at times; measuring before changing more (Apple side)
+
+- Danny: the left hand is still missed sometimes. Not yet reproduced or measured on the device.
+- What a picture already shows (Vision 2D on a frame of five small dancers): wrist confidences sit
+  around the 0.2 cut-off (0.14–0.58), so wrists of a small or blurred figure are dropped often.
+- App 0.6.1, low-risk changes: exposures limited to 1/120 s in both camera sources (less motion blur);
+  in the ultra-wide source a joint the picture does not show keeps the 3D model's offset from its
+  parent, hung on the parent as placed (an unseen wrist follows the seen elbow); a diagnostics line
+  with how often each wrist and ankle was seen over the last 60 frames.
+- **"Record 10 s"** (diagnostics card, or `-l2kRecord 10`): saves the camera to
+  `Documents/l2k_record.mov` + `.json`. Plan: pull a clip of Danny moving, run the detectors over
+  it on the Mac, and decide from the numbers between cropping to the person, a lower cut-off, and
+  temporal filtering. None of those is implemented yet.
+
 ## 2026-11-10 (late night, 2) — players kept through dropouts (Apple side)
 
 - Danny: when the game loses the player and the player comes back, the game does not see the same

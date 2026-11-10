@@ -29,12 +29,16 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     private var lastMask: CVPixelBuffer?
     private var bodyVisible = false
     private var trackingID: UInt32 = 0
+    private var seenRate = JointSeenRate()
 
     private let stateLock = NSLock()
     private var lastStatus = "Starting"
     private var lastDiagnostics: [String] = []
     private var frames = 0
     private var rateStart: TimeInterval = 0, rateCount = 0, rate = 0.0
+
+    /// The longest exposure allowed is 1/this second.
+    public static let shortestExposureDenominator: Int32 = 120
 
     public static var camera: AVCaptureDevice? {
         AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back)
@@ -113,6 +117,9 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
                 // a Kinect delivers 30 frames per second
                 camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
                 camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+                // Short exposures: a fast-moving hand smeared across the frame is a hand the detector loses.
+                // The camera raises its gain instead; a noisier picture costs the detector less than blur.
+                camera.activeMaxExposureDuration = CMTime(value: 1, timescale: Self.shortestExposureDenominator)
                 camera.unlockForConfiguration()
             }
             self.session.startRunning()
@@ -167,6 +174,7 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
 
         var bodies: [l2k_src_body] = []
         if !joints.isEmpty {
+            seenRate.note(detector.lastSeenSources)
             if !bodyVisible {
                 bodyVisible = true
                 trackingID = trackingID == UInt32.max ? 1 : trackingID + 1 // a body that reappears is a new skeleton
@@ -192,6 +200,7 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             lines.append(String(format: "Vision 2D + 3D pose: %d joints (%d from the picture, %d from the model), %.0f ms; with mask %.0f ms",
                                 joints.count, detector.lastSeen, detector.lastModelOnly, poseMs, visionMs)
                          + (detector.lastError.map { " — \($0)" } ?? ""))
+            lines.append(seenRate.summary)
             if !joints.isEmpty {
                 lines.append(String(format: "Body height %.2f m (%@)", detector.lastHeight, detector.lastHeightMeasured ? "measured" : "assumed"))
             }

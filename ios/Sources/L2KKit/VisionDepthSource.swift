@@ -23,6 +23,8 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
     private let masker = VisionPersonMask()
     private var tracker = VisionPersonTracker()
     private var arkitMask = false
+    private var jointsSeen = JointSeenRate()
+    private var exposureLimited = false
     private var lastProcessed: TimeInterval = 0
 
     private let stateLock = NSLock()
@@ -70,6 +72,12 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
         session.delegate = self
         session.delegateQueue = queue
         session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+        // Short exposures, as in the ultra-wide source: less motion blur on fast hands and feet.
+        if let camera = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera, (try? camera.lockForConfiguration()) != nil {
+            camera.activeMaxExposureDuration = CMTime(value: 1, timescale: UltraWideSource.shortestExposureDenominator)
+            camera.unlockForConfiguration()
+            exposureLimited = true
+        }
     }
 
     public func stop() {
@@ -108,6 +116,7 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
         let visionMs = (ProcessInfo.processInfo.systemUptime - visionStart) * 1000
 
         // The two largest people, each with a stable id, lifted with the depth map.
+        if let first = people.max(by: { $0.size < $1.size }) { jointsSeen.note(Set(first.joints.map(\.source))) }
         let ids = tracker.assign(people)
         let chosen = zip(people, ids).sorted { $0.0.size > $1.0.size }.prefix(maxTracked)
         var bodies: [l2k_src_body] = []
@@ -211,6 +220,8 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
         }
         lines.append(String(format: "Vision: %d people, %.0f ms", people, visionMs) + (detector.lastError.map { " — \($0)" } ?? ""))
         if !lifted.isEmpty { lines.append("Joints placed per person: " + lifted.map(String.init).joined(separator: ", ") + " of 15") }
+        lines.append(jointsSeen.summary)
+        lines.append("Exposure limited to 1/\(UltraWideSource.shortestExposureDenominator) s: \(exposureLimited ? "yes" : "no")")
         if let lastError { lines.append("Last ARKit error: \(lastError)") }
         setStatus(parts.joined(separator: " · "), diagnostics: lines)
     }

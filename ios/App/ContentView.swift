@@ -69,6 +69,25 @@ struct ContentView: View {
                 UIPasteboard.general.string = lines.joined(separator: "\n")
             }
             .font(.footnote)
+            Divider()
+            HStack {
+                Button("Record 10 s") { model.record() }
+                    .font(.footnote)
+                    .disabled({ if case .recording = model.recording { return true } else { return false } }())
+                Spacer()
+                Text(recordingText).font(.footnote).foregroundStyle(.secondary)
+            }
+            Text("Saves ten seconds of the camera to this app's files, to test the body tracking against it on the Mac.")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+    }
+
+    private var recordingText: String {
+        switch model.recording {
+        case .idle: return ""
+        case .recording(let left): return "Recording, \(left) s left"
+        case .saved(let name): return "Saved \(name)"
+        case .failed(let reason): return reason
         }
     }
 

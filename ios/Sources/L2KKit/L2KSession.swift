@@ -7,6 +7,8 @@ import L2KShared
 public final class L2KSession {
     public let pipeline = L2KPipeline()
     public let sender = L2KSender()
+    /// Records the source's camera frames when asked (troubleshooting).
+    public let recorder = L2KRecorder()
     public private(set) var source: L2KSource?
 
     /// Every produced frame, on the source's queue. Keep the work short or hand it off.
@@ -64,6 +66,11 @@ public final class L2KSession {
         if lastOutput > 0, sourceFrame.timestamp - lastOutput < interval * 0.75 { return }
         lastOutput = sourceFrame.timestamp
 
+        recorder.append(sourceFrame.image, timestamp: sourceFrame.timestamp, extra: [
+            "up": [sourceFrame.upCamera.x, sourceFrame.upCamera.y, sourceFrame.upCamera.z],
+            "quadrant": Int(l2k_quadrant_from_up(sourceFrame.upCamera.x, sourceFrame.upCamera.y)),
+            "camera": [sourceFrame.camera.fxn, sourceFrame.camera.fyn, sourceFrame.camera.cxn, sourceFrame.camera.cyn],
+        ])
         let wanted = sender.wanted
         let sendDepth = wanted.streams & L2K.streamDepth != 0
         let sendColor = wanted.streams & L2K.streamColor != 0

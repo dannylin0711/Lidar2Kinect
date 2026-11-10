@@ -191,6 +191,18 @@ final class VisionHybridDetector {
     private(set) var lastHeightMeasured = false
     /// How many joints of the last result came from the picture (2D) and how many from the 3D model alone.
     private(set) var lastSeen = 0, lastModelOnly = 0
+    /// The source joints the picture showed in the last result.
+    private(set) var lastSeenSources = Set<Int>()
+
+    /// (joint, parent) from the trunk outwards.
+    private static let hierarchy: [(Int, Int)] = [
+        (Int(L2K_SRC_NECK), Int(L2K_SRC_PELVIS)), (Int(L2K_SRC_HEAD), Int(L2K_SRC_NECK)),
+        (Int(L2K_SRC_SHOULDER_LEFT), Int(L2K_SRC_NECK)), (Int(L2K_SRC_ELBOW_LEFT), Int(L2K_SRC_SHOULDER_LEFT)), (Int(L2K_SRC_WRIST_LEFT), Int(L2K_SRC_ELBOW_LEFT)),
+        (Int(L2K_SRC_SHOULDER_RIGHT), Int(L2K_SRC_NECK)), (Int(L2K_SRC_ELBOW_RIGHT), Int(L2K_SRC_SHOULDER_RIGHT)), (Int(L2K_SRC_WRIST_RIGHT), Int(L2K_SRC_ELBOW_RIGHT)),
+        (Int(L2K_SRC_HIP_LEFT), Int(L2K_SRC_PELVIS)), (Int(L2K_SRC_KNEE_LEFT), Int(L2K_SRC_HIP_LEFT)), (Int(L2K_SRC_ANKLE_LEFT), Int(L2K_SRC_KNEE_LEFT)),
+        (Int(L2K_SRC_HIP_RIGHT), Int(L2K_SRC_PELVIS)), (Int(L2K_SRC_KNEE_RIGHT), Int(L2K_SRC_HIP_RIGHT)), (Int(L2K_SRC_ANKLE_RIGHT), Int(L2K_SRC_KNEE_RIGHT)),
+        (Int(L2K_SRC_PELVIS), Int(L2K_SRC_NECK)),
+    ]
 
     func detect(in image: CVPixelBuffer, quadrant: Int32) -> [VisionJoint3D] {
         let handler = VNImageRequestHandler(cvPixelBuffer: image, orientation: VisionOrientation.orientation(forQuadrant: quadrant), options: [:])
@@ -222,8 +234,20 @@ final class VisionHybridDetector {
             }
         }
         lastSeen = joints.count
-        for joint in model where !seen.contains(joint.source) {
-            joints.append(VisionJoint3D(source: joint.source, u: joint.u, v: joint.v, depth: joint.depth, confidence: 1))
+        lastSeenSources = seen
+        // A joint the picture does not show keeps the model's offset from its parent joint, hung on the parent as
+        // placed so far - so an unseen wrist follows the seen elbow instead of jumping to the model's own position.
+        var placed = Dictionary(uniqueKeysWithValues: joints.map { ($0.source, $0) })
+        let modelBySource = Dictionary(uniqueKeysWithValues: model.map { ($0.source, $0) })
+        for (source, parent) in Self.hierarchy where placed[source] == nil {
+            guard let m = modelBySource[source] else { continue }
+            var joint = VisionJoint3D(source: source, u: m.u, v: m.v, depth: m.depth, confidence: 1)
+            if let p = placed[parent], let mp = modelBySource[parent] {
+                joint.u = p.u + (m.u - mp.u)
+                joint.v = p.v + (m.v - mp.v)
+            }
+            placed[source] = joint
+            joints.append(joint)
         }
         lastModelOnly = joints.count - lastSeen
         return joints
@@ -286,5 +310,29 @@ struct VisionPersonTracker {
         }
         tracks = zip(ids, people).map { (id: $0.0, centre: $0.1.centre) }
         return ids
+    }
+}
+
+/// How often the picture showed each wrist and ankle over the last two seconds of frames - the joints a dance game
+/// needs most and a detector loses first.
+struct JointSeenRate {
+    private static let watched: [(Int, String)] = [
+        (Int(L2K_SRC_WRIST_LEFT), "L wrist"), (Int(L2K_SRC_WRIST_RIGHT), "R wrist"),
+        (Int(L2K_SRC_ANKLE_LEFT), "L ankle"), (Int(L2K_SRC_ANKLE_RIGHT), "R ankle"),
+    ]
+    private var history: [Set<Int>] = []
+    var window = 60
+
+    /// Call once per processed frame that has a body, with the joints the picture showed.
+    mutating func note(_ seen: Set<Int>) {
+        history.append(seen)
+        if history.count > window { history.removeFirst(history.count - window) }
+    }
+
+    var summary: String {
+        guard !history.isEmpty else { return "Seen in the picture: no body yet" }
+        return "Seen in the picture (last \(history.count) frames): " + Self.watched.map { source, name in
+            "\(name) \(history.filter { $0.contains(source) }.count * 100 / history.count)%"
+        }.joined(separator: ", ")
     }
 }

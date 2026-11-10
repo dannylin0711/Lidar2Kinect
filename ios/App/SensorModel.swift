@@ -52,6 +52,7 @@ final class SensorModel: ObservableObject {
     /// The zoom of the picture currently shown (the depth preview is never zoomed).
     @Published var shownZoom: CGFloat = 1
     @Published var diagnostics: [String] = []
+    @Published var recording: L2KRecorder.State = .idle
     @Published var host: String { didSet { UserDefaults.standard.set(host, forKey: "l2kHost") } }
     @Published var port: String { didSet { UserDefaults.standard.set(port, forKey: "l2kPort") } }
 
@@ -115,6 +116,10 @@ final class SensorModel: ObservableObject {
         applyPreviewMode()
         startSource()
         if UserDefaults.standard.bool(forKey: "l2kAutoConnect"), !host.isEmpty { connect() }
+        let recordSeconds = UserDefaults.standard.double(forKey: "l2kRecord") // -l2kRecord 10: record after a 3 s delay
+        if recordSeconds > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.record(seconds: recordSeconds) }
+        }
         if UserDefaults.standard.bool(forKey: "l2kLog") {
             print("L2K-LOG sources: \(availableSources.map(\.rawValue).joined(separator: ",")) chosen: \(sourceChoice.rawValue)")
             for item in deviceSupport { print("L2K-LOG support \(item.supported ? "yes" : "no ") \(item.label)") }
@@ -141,6 +146,14 @@ final class SensorModel: ObservableObject {
         lines += diagnostics.map { "L2K-LOG   " + $0 }
         print(lines.joined(separator: "\n"))
         fflush(stdout)
+    }
+
+    /// Record the camera for a few seconds to Documents/l2k_record.mov (and .json), for troubleshooting on the Mac.
+    func record(seconds: TimeInterval = 10) {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        session.recorder.onState = { [weak self] state in self?.recording = state }
+        session.recorder.start(url: documents.appendingPathComponent("l2k_record.mov"), seconds: seconds,
+                               notes: ["source": sourceChoice.rawValue, "app": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""])
     }
 
     func selectSource(_ choice: SourceChoice) {
