@@ -143,24 +143,28 @@ and fit the parameters. Until then the joints that depend on them are plausible 
 
 ## 7. Capture sources
 
-| Source | ARKit session | Bodies | Depth image | Status |
+What ARKit supports was read on an iPad Pro (M2) and an iPhone 17 Pro on 2026-11-10 (the app's
+"This device" card): world tracking gives the LiDAR depth map, **but not together with 2D body
+detection**; 3D body tracking is supported, **but with neither the depth map nor a person mask**.
+ARKit alone therefore cannot give a body and LiDAR depth in the same session.
+
+| Source | Where the body comes from | Bodies | Depth image | Status |
 |---|---|---|---|---|
-| LiDAR depth (`ARKitDepthSource`) | world tracking with `sceneDepth` + `personSegmentationWithDepth` + `bodyDetection` (as many as the device supports together) | 1 | the LiDAR depth map, players from the person mask | written 2026-11-10, lifting maths tested on the Mac; **not yet run on a device** |
-| Body tracking (`ARKitBodySource`) | body tracking (3D skeleton) | 1 | none from ARKit: drawn from the skeleton | run on Danny's device 2026-11-10: no depth reported |
-| Synthetic figure (`SyntheticSource`, `l2k_synth_body`) | none | 1–2 | drawn from the skeleton | working; used by tests, the simulator and `l2k_fake_sender` |
-| Vision body pose + LiDAR depth | world tracking | several | LiDAR depth map | planned: needed for two players and for the front camera |
+| LiDAR depth (`VisionDepthSource`) | ARKit world tracking for the image, intrinsics, gravity and the LiDAR depth map; **Vision** 2D body pose on the camera image, lifted with the depth map | up to 2 | the LiDAR depth map; players from ARKit's person mask where it combines with scene depth, else Vision's | written 2026-11-10; coordinate handling tested on the Mac; **not yet run on a device** |
+| Body tracking (`ARKitBodySource`) | ARKit's model-based 3D skeleton | 1 | no depth map on these devices: drawn from the skeleton | ran on Danny's devices without a skeleton appearing; cause not established |
+| Synthetic figure (`SyntheticSource`, `l2k_synth_body`) | generated | 1–2 | drawn from the skeleton | working; used by tests, the simulator and `l2k_fake_sender` |
 
-ARKit's documentation ties `sceneDepth` to the world-tracking configuration, and on the first
-device run the body-tracking source reported no depth. So the two ARKit sources split the job
-differently:
+**LiDAR depth, step by step.** Vision's body-pose request runs on each camera frame (at most 30
+per second; a frame already 150 ms old is skipped), told how the device is rolled so it sees
+people upright. Its points come back in the upright image and are turned into buffer coordinates
+(`VisionOrientation`, tested for the four rolls with a QR code). Each joint then gets the depth
+the LiDAR measured at its pixel (`DepthLift`): the median over the person pixels of a 5×5 window,
+plus a per-joint surface-to-joint offset; a limb joint more than 1 m from the torso's depth is
+held at the torso's depth and reported as estimated. People keep their id from frame to frame by
+nearest position (`VisionPersonTracker`); the two largest are sent. With two players, each mask
+pixel goes to the player whose body centre is nearest by image column.
 
-- **LiDAR depth** takes ARKit's 2D body (13–15 joints in the camera image) and gives each joint the
-  depth the LiDAR measured at its pixel (`DepthLift`): the median over the person pixels of a 5×5
-  window, plus a per-joint surface-to-joint offset; a limb joint more than 1 m from the torso's
-  depth is held at the torso's depth and reported as estimated. The skeleton is metric and the
-  depth image is real. A joint hidden behind the body gets the depth of what hides it.
-- **Body tracking** uses ARKit's model-based 3D skeleton. It keeps a plausible pose for hidden
-  limbs, but there is no depth map, so the depth image is a capsule figure drawn from the skeleton.
-
-Which one tracks dancing better is not known yet; the app offers both and shows, under "This
-device", what ARKit says it supports.
+Consequences: the skeleton is metric and the depth image is real; a joint hidden behind the body
+gets the depth of what hides it; the head joint is placed from the ears or the nose. Vision's
+left and right are taken to be the person's own — the app draws the left side orange and the
+right side blue so this can be checked at a glance on a device.

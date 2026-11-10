@@ -29,6 +29,10 @@ struct ContentView: View {
     private var previewColumn: some View {
         VStack(spacing: 8) {
             SensorPreview(image: model.preview, skeleton: model.skeleton)
+            Text(model.previewMode == .depth
+                 ? "Depth: bright = near, blue = outside the Kinect's 0.8–4 m, green = person, black = no reading. Skeleton: orange = your left, blue = your right."
+                 : "Skeleton: orange = your left side, blue = your right side.")
+                .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             Picker("Preview", selection: $model.previewMode) {
                 ForEach(SensorModel.PreviewMode.allCases) { Text($0.title).tag($0) }
             }
@@ -40,7 +44,30 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             sensorCard
             receiverCard
+            if !model.diagnostics.isEmpty { diagnosticsCard }
             if !model.deviceSupport.isEmpty { supportCard }
+            Text("Lidar2Kinect \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+    }
+
+    // MARK: - live diagnostics
+
+    /// What the sensors deliver right now. "Copy" puts all of it, with the device support list, on the clipboard.
+    private var diagnosticsCard: some View {
+        Card(title: "Live diagnostics") {
+            ForEach(model.diagnostics, id: \.self) { line in
+                Text(line).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            }
+            Button("Copy diagnostics") {
+                var lines = ["Lidar2Kinect \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") on \(UIDevice.current.name)",
+                             "Source: \(model.sourceChoice.title)\(model.upperBodyOnly ? ", upper body only" : "")",
+                             "Status: \(model.sourceStatus)"]
+                lines += model.diagnostics
+                lines += model.deviceSupport.map { "\($0.supported ? "yes" : "no ")  \($0.label)" }
+                UIPasteboard.general.string = lines.joined(separator: "\n")
+            }
+            .font(.footnote)
         }
     }
 

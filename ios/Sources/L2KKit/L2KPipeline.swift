@@ -14,6 +14,17 @@ public struct L2KFrame {
     public var color: CIImage?
     /// Device roll in quarter turns used for this frame.
     public var quadrant: Int32
+    /// For a local preview only: what the depth sensor reports, seen through the virtual Kinect camera, before the
+    /// Kinect range limits and the players-only setting are applied. nil when not requested or the source has no depth map.
+    public var depthPreview: L2KDepthPreview?
+}
+
+/// The raw depth map resampled to the virtual Kinect image (320x240).
+public struct L2KDepthPreview {
+    /// Metres along the optical axis; 0 = the sensor reports nothing there.
+    public var metres: [Float]
+    /// Nonzero where the person mask says "person". Empty when the source has no mask.
+    public var person: [UInt8]
 }
 
 public final class L2KPipeline {
@@ -43,7 +54,8 @@ public final class L2KPipeline {
 
     /// Build the Kinect frame for one source frame. Call from one queue only.
     /// - Parameter playersOnly: keep depth only on player pixels (L2K_DEPTH_MODE_PLAYERS).
-    public func process(_ source: L2KSourceFrame, kind: UInt8, wantDepth: Bool, wantColor: Bool, playersOnly: Bool) -> L2KFrame {
+    public func process(_ source: L2KSourceFrame, kind: UInt8, wantDepth: Bool, wantColor: Bool, playersOnly: Bool,
+                        wantDepthPreview: Bool = false) -> L2KFrame {
         let q = updateQuadrant(up: source.upCamera)
         mapper.params.upper_body = upperBodyMode ? 1 : 0
         var skeleton = l2k_skeleton_frame()
@@ -58,6 +70,9 @@ public final class L2KPipeline {
         }
         if wantColor, let image = source.image {
             frame.color = colorImage(image, camera: source.camera, quadrant: q)
+        }
+        if wantDepthPreview {
+            frame.depthPreview = depthPreview(source, quadrant: q)
         }
         return frame
     }
@@ -130,7 +145,67 @@ public final class L2KPipeline {
                 l2k_depth_rasterize(&skeleton, out.baseAddress, width, height, 1)
             }
         }
+        if mask != nil, tracked.count > 1 {
+            relabelPlayers(&pixels, tracked: tracked)
+        }
         return pixels
+    }
+
+    /// The person mask does not say who is who. With two tracked players, each player pixel goes to the player
+    /// whose body centre is nearest in the image (by column).
+    private func relabelPlayers(_ pixels: inout [UInt16], tracked: [(slot: Int, skeleton: l2k_skeleton)]) {
+        let width = Int(L2K_DEPTH_WIDTH), height = Int(L2K_DEPTH_HEIGHT)
+        var columns: [(u: Float, index: UInt16)] = []
+        for player in tracked {
+            var u: Float = 0, v: Float = 0
+            if l2k_skeleton_to_depth_pixel(player.skeleton.position, Int32(width), Int32(height), &u, &v) == 1 {
+                columns.append((u, UInt16(player.slot + 1)))
+            }
+        }
+        guard columns.count > 1 else { return }
+        let mask = UInt16(L2K_PLAYER_INDEX_MASK)
+        for x in 0..<width {
+            let nearest = columns.min { abs($0.u - Float(x)) < abs($1.u - Float(x)) }!.index
+            for y in 0..<height {
+                let i = y * width + x
+                if pixels[i] & mask != 0 { pixels[i] = (pixels[i] & ~mask) | nearest }
+            }
+        }
+    }
+
+    /// The source's depth map (and mask) through the virtual Kinect camera, with nothing filtered out.
+    private func depthPreview(_ source: L2KSourceFrame, quadrant: Int32) -> L2KDepthPreview? {
+        guard let depthMap = source.depthMap, CVPixelBufferGetPixelFormatType(depthMap) == kCVPixelFormatType_DepthFloat32 else { return nil }
+        let mask = source.segmentation.flatMap { CVPixelBufferGetPixelFormatType($0) == kCVPixelFormatType_OneComponent8 ? $0 : nil }
+        let width = Int(L2K_DEPTH_WIDTH), height = Int(L2K_DEPTH_HEIGHT)
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        if let mask { CVPixelBufferLockBaseAddress(mask, .readOnly) }
+        defer {
+            CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+            if let mask { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+        }
+        guard let depthBase = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
+        let dw = CVPixelBufferGetWidth(depthMap), dh = CVPixelBufferGetHeight(depthMap), dstride = CVPixelBufferGetBytesPerRow(depthMap)
+        let maskBase = mask.flatMap { CVPixelBufferGetBaseAddress($0) }
+        let mw = mask.map { CVPixelBufferGetWidth($0) } ?? 0, mh = mask.map { CVPixelBufferGetHeight($0) } ?? 0
+        let mstride = mask.map { CVPixelBufferGetBytesPerRow($0) } ?? 0
+        var metres = [Float](repeating: 0, count: width * height)
+        var person = [UInt8](repeating: 0, count: maskBase == nil ? 0 : width * height)
+        var camera = source.camera
+        for v in 0..<height {
+            for u in 0..<width {
+                var sx: Float = 0, sy: Float = 0
+                l2k_virtual_to_source(&camera, quadrant, (Float(u) + 0.5) / Float(width), (Float(v) + 0.5) / Float(height), &sx, &sy)
+                guard sx >= 0, sx < 1, sy >= 0, sy < 1 else { continue }
+                let d = depthBase.advanced(by: Int(sy * Float(dh)) * dstride).assumingMemoryBound(to: Float.self)[Int(sx * Float(dw))]
+                if d.isFinite, d > 0 { metres[v * width + u] = d }
+                if let maskBase {
+                    person[v * width + u] = maskBase.advanced(by: Int(sy * Float(mh)) * mstride + Int(sx * Float(mw)))
+                        .assumingMemoryBound(to: UInt8.self).pointee >= 128 ? 1 : 0
+                }
+            }
+        }
+        return L2KDepthPreview(metres: metres, person: person)
     }
 
     // MARK: - colour

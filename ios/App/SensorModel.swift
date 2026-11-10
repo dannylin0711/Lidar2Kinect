@@ -39,6 +39,7 @@ final class SensorModel: ObservableObject {
     @Published var preview: CGImage?
     @Published var skeleton: l2k_skeleton_frame?
     @Published var frameRate: Double = 0
+    @Published var diagnostics: [String] = []
     @Published var host: String { didSet { UserDefaults.standard.set(host, forKey: "l2kHost") } }
     @Published var port: String { didSet { UserDefaults.standard.set(port, forKey: "l2kPort") } }
 
@@ -59,7 +60,7 @@ final class SensorModel: ObservableObject {
         #if targetEnvironment(simulator)
         deviceSupport = []
         #else
-        if ARKitDepthSource.isSupported { sources.append(.lidar) }
+        if VisionDepthSource.isSupported { sources.append(.lidar) }
         if ARKitBodySource.isSupported { sources.append(.arkit) }
         deviceSupport = L2KDeviceSupport.report()
         #endif
@@ -85,12 +86,13 @@ final class SensorModel: ObservableObject {
         }
         discovery.onChange = { [weak self] receivers in self?.receivers = receivers }
         discovery.start()
-        previewer.onPreview = { [weak self] image, skeleton, rate, status in
+        previewer.onPreview = { [weak self] image, skeleton, rate, status, diagnostics in
             guard let self else { return }
             self.preview = image
             self.skeleton = skeleton
             self.frameRate = rate
             self.sourceStatus = status
+            self.diagnostics = diagnostics
         }
         applyPreviewMode()
         startSource()
@@ -110,7 +112,7 @@ final class SensorModel: ObservableObject {
         source = SyntheticSource(players: players)
         #else
         switch sourceChoice {
-        case .lidar: source = ARKitDepthSource()
+        case .lidar: source = VisionDepthSource()
         case .arkit: source = ARKitBodySource()
         case .synthetic: source = SyntheticSource(players: players)
         }
@@ -130,6 +132,7 @@ final class SensorModel: ObservableObject {
     private func applyPreviewMode() {
         session.localWantsColor = previewMode == .color
         session.localWantsDepth = previewMode == .depth
+        session.localWantsDepthPreview = previewMode == .depth
         previewer.mode = previewMode
     }
 
@@ -151,7 +154,7 @@ final class SensorModel: ObservableObject {
 /// Turns frames into preview images on the capture queue, at most 15 times per second.
 final class Previewer {
     /// Called on the main queue.
-    var onPreview: ((CGImage?, l2k_skeleton_frame, Double, String) -> Void)?
+    var onPreview: ((CGImage?, l2k_skeleton_frame, Double, String, [String]) -> Void)?
     var context: CIContext?
     weak var source: L2KSource?
 
@@ -182,10 +185,44 @@ final class Previewer {
         case .color:
             if let color = frame.color { image = context?.createCGImage(color, from: color.extent) }
         case .depth:
-            if let depth = frame.depth { image = Self.depthImage(depth) }
+            // What the sensor reports when it has a depth map; else the image that would be sent (a drawn figure).
+            if let raw = frame.depthPreview {
+                image = Self.rawDepthImage(raw)
+            } else if let depth = frame.depth {
+                image = Self.depthImage(depth)
+            }
         }
-        let skeleton = frame.skeleton, rate = rate, status = source?.statusText ?? ""
-        DispatchQueue.main.async { [weak self] in self?.onPreview?(image, skeleton, rate, status) }
+        let skeleton = frame.skeleton, rate = rate, status = source?.statusText ?? "", diagnostics = source?.diagnostics ?? []
+        DispatchQueue.main.async { [weak self] in self?.onPreview?(image, skeleton, rate, status, diagnostics) }
+    }
+
+    /// The raw depth map: grey by distance (near = bright) inside the Kinect's 0.8-4 m range, blue outside it
+    /// (seen by the LiDAR but a Kinect would report nothing), green where the person mask is set, black = no reading.
+    static func rawDepthImage(_ raw: L2KDepthPreview) -> CGImage? {
+        let width = L2K.depthWidth, height = L2K.depthHeight
+        var rgba = [UInt8](repeating: 255, count: width * height * 4)
+        let hasMask = !raw.person.isEmpty
+        for i in 0..<(width * height) {
+            let d = raw.metres[i]
+            var r: Float = 0, g: Float = 0, b: Float = 0
+            if d > 0 {
+                let level = max(0.15, min(1, 1 - (d - 0.3) / 5.0))
+                if hasMask && raw.person[i] != 0 {
+                    (r, g, b) = (0.25 * level, level, 0.4 * level)
+                } else if d < 0.8 || d > 4.0 {
+                    (r, g, b) = (0.2 * level, 0.35 * level, level)
+                } else {
+                    (r, g, b) = (level, level, level)
+                }
+            }
+            rgba[i * 4] = UInt8(255 * r)
+            rgba[i * 4 + 1] = UInt8(255 * g)
+            rgba[i * 4 + 2] = UInt8(255 * b)
+        }
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 
     /// Depth as grey (near = bright), player pixels tinted by player index.

@@ -14,6 +14,8 @@ public final class L2KSession {
     /// Images the local consumer wants in `onFrame` even when the receiver did not ask for them.
     public var localWantsDepth = false
     public var localWantsColor = false
+    /// The local consumer wants `L2KFrame.depthPreview` (the raw depth map, for showing what the sensor reports).
+    public var localWantsDepthPreview = false
     /// Output rate in frames per second. A Kinect delivers 30.
     public var outputRate: Double = 30
     /// Name announced to receivers.
@@ -62,7 +64,8 @@ public final class L2KSession {
         let frame = pipeline.process(sourceFrame, kind: source.kind,
                                      wantDepth: sendDepth || localWantsDepth,
                                      wantColor: sendColor || localWantsColor,
-                                     playersOnly: wanted.depthMode == UInt8(L2K_DEPTH_MODE_PLAYERS))
+                                     playersOnly: wanted.depthMode == UInt8(L2K_DEPTH_MODE_PLAYERS),
+                                     wantDepthPreview: localWantsDepthPreview)
         if wanted.streams != 0 {
             var jpeg: Data?
             if sendColor, let color = frame.color {

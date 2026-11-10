@@ -26,6 +26,24 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-10 (night) — device facts, LiDAR depth source rebuilt on Vision (Apple side)
+
+- Danny ran 0.3.0 on an iPad Pro (M2) and an iPhone 17 Pro: no skeleton, no depth. The "This
+  device" card on both: 3D body tracking yes; world tracking + LiDAR depth yes; every combination
+  of the depth map with a body (2D or 3D) no. So `ARKitDepthSource` (ARKit 2D body + depth) could
+  never start on these devices; it is removed.
+- New `VisionDepthSource` (app: "LiDAR depth"): ARKit world tracking for the depth map, Vision for
+  the 2D body pose of up to two people, lifted with the depth map (`docs/03` §7). Vision's
+  orientation handling is tested on the Mac with a QR code in all four device rolls.
+- App 0.4.0: live diagnostics card (frame counts, depth map size / centre distance / range, person
+  mask coverage, people seen, joints placed, errors) with a "Copy diagnostics" button; the depth
+  preview now shows the raw depth map (before the Kinect range and players-only filters, which made
+  it black when no person was in view); the skeleton's left side is orange and right side blue.
+- ARKit's 2D and 3D joint names used by the sources were checked: the 2D list printed from the
+  simulator, the 3D names against Apple's motion-capture documentation. All present.
+- Not established: why the 3D body-tracking source showed no skeleton on the devices.
+- **Nothing in this entry has run on a device yet.**
+
 ## 2026-11-10 (evening) — upper-body mode (Apple side)
 
 - Danny asked for tracking of just the upper half of the body, with leg notes left to miss.

@@ -26,6 +26,14 @@ public final class ARKitBodySource: NSObject, L2KSource, ARSessionDelegate {
         return lastStatus
     }
 
+    private var lastDiagnostics: [String] = []
+    private var framesSeen = 0
+    public var diagnostics: [String] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return lastDiagnostics
+    }
+
     /// ARKit skeleton joint name for each source joint the mapper takes (L2K_SRC_* index).
     /// Hands are left out on purpose: ARKit does not track the wrist's rotation, so the mapper extends the forearm instead.
     private static let jointNames: [(Int, String)] = [
@@ -122,9 +130,19 @@ public final class ARKitBodySource: NSObject, L2KSource, ARSessionDelegate {
 
         let depth = frame.sceneDepth?.depthMap ?? frame.estimatedDepthData
         let mask = frame.segmentationBuffer
+        framesSeen += 1
+        let anchors = frame.anchors.compactMap { $0 as? ARBodyAnchor }
+        let trackedJoints = anchors.first.map { anchor in (0..<anchor.skeleton.definition.jointCount).filter { anchor.skeleton.isJointTracked($0) }.count }
         stateLock.lock()
         lastStatus = Self.describe(bodies: bodies.count, depth: depth != nil, mask: mask != nil,
                                    tracking: frame.camera.trackingState, missing: missingJointNames)
+        lastDiagnostics = [
+            "ARKit frames \(framesSeen), image \(Int(size.width))×\(Int(size.height))",
+            "Body anchors \(anchors.count), tracked \(anchors.filter(\.isTracked).count)"
+                + (trackedJoints.map { ", joints ARKit tracks: \($0)" } ?? ""),
+            "Joint names found \(jointMap.count + (headIndex == nil ? 0 : 1)) of 17",
+            "Depth map \(depth == nil ? "none" : "present"), person mask \(mask == nil ? "none" : "present")",
+        ]
         stateLock.unlock()
 
         onFrame?(L2KSourceFrame(timestamp: frame.timestamp, bodies: bodies, upCamera: up, camera: camera,

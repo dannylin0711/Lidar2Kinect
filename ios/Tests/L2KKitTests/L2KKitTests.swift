@@ -1,4 +1,6 @@
 import CoreImage
+import CoreImage.CIFilterBuiltins
+import Vision
 import L2KShared
 import Network
 import XCTest
@@ -175,6 +177,54 @@ final class L2KKitTests: XCTestCase {
         XCTAssertLessThan(body.position(of: .ankleLeft).y, body.position(of: .hipLeft).y)
         // the depth image still shows a whole figure, drawn from the completed skeleton
         XCTAssertGreaterThan(try XCTUnwrap(upper.depth).filter { l2k_depth_player($0) == 1 }.count, 1500)
+    }
+
+    /// Vision answers in the upright image; the source needs buffer coordinates. A QR code drawn at a known place in
+    /// the buffer must come back at that place for every device roll (this pins the orientation <-> conversion pair).
+    func testVisionPointsComeBackInBufferCoordinates() throws {
+        let width = 640, height = 480
+        let target = (u: Float(0.30), v: Float(0.70)) // buffer coordinates, origin top-left
+        let generator = CIFilter.qrCodeGenerator()
+        generator.message = Data("lidar2kinect".utf8)
+        let code = try XCTUnwrap(generator.outputImage)
+        let side: CGFloat = 120
+        let scale = side / code.extent.width
+        // Core Image's origin is bottom-left: buffer row v from the top is y = height * (1 - v)
+        let centre = CGPoint(x: CGFloat(target.u) * CGFloat(width), y: CGFloat(height) * CGFloat(1 - target.v))
+        let placed = code.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .transformed(by: CGAffineTransform(translationX: centre.x - side / 2, y: centre.y - side / 2))
+        let canvas = placed.composited(over: CIImage(color: .white)).cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
+        var buffer: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA,
+                                           [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary, &buffer), kCVReturnSuccess)
+        let image = try XCTUnwrap(buffer)
+        CIContext().render(canvas, to: image)
+
+        for quadrant in Int32(0)..<4 {
+            let request = VNDetectBarcodesRequest()
+            let handler = VNImageRequestHandler(cvPixelBuffer: image, orientation: VisionOrientation.orientation(forQuadrant: quadrant), options: [:])
+            try handler.perform([request])
+            let box = try XCTUnwrap(request.results?.first?.boundingBox, "no code found for quadrant \(quadrant)")
+            let point = VisionOrientation.bufferPoint(fromVision: CGPoint(x: box.midX, y: box.midY), quadrant: quadrant)
+            XCTAssertEqual(point.u, target.u, accuracy: 0.02, "quadrant \(quadrant)")
+            XCTAssertEqual(point.v, target.v, accuracy: 0.02, "quadrant \(quadrant)")
+        }
+    }
+
+    func testPersonTrackerKeepsIdentities() {
+        var tracker = VisionPersonTracker()
+        func person(_ x: Float) -> VisionPerson { VisionPerson(joints: [], centre: SIMD2(x, 0.5), size: 0.2) }
+        let first = tracker.assign([person(0.3), person(0.7)])
+        XCTAssertEqual(Set(first).count, 2)
+        // the detections arrive in the other order and have moved a little: same ids
+        let second = tracker.assign([person(0.72), person(0.28)])
+        XCTAssertEqual(second, [first[1], first[0]])
+        // one leaves, one stays; then a newcomer far away gets a new id
+        let third = tracker.assign([person(0.29)])
+        XCTAssertEqual(third, [first[0]])
+        let fourth = tracker.assign([person(0.30), person(0.9)])
+        XCTAssertEqual(fourth[0], first[0])
+        XCTAssertFalse(first.contains(fourth[1]))
     }
 
     /// The sender against a minimal receiver on localhost: HELLO -> CONFIG -> the requested streams arrive and decode.

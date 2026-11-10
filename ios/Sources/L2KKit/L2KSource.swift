@@ -52,7 +52,13 @@ public protocol L2KSource: AnyObject {
     var providesImages: Bool { get }
     /// One line for the UI: what the source is doing / what it lacks.
     var statusText: String { get }
+    /// Detail lines for troubleshooting (what the sensors deliver right now). May be empty.
+    var diagnostics: [String] { get }
     var onFrame: ((L2KSourceFrame) -> Void)? { get set }
     func start() throws
     func stop()
+}
+
+public extension L2KSource {
+    var diagnostics: [String] { [] }
 }

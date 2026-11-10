@@ -7,7 +7,16 @@ struct SensorPreview: View {
     let image: CGImage?
     let skeleton: l2k_skeleton_frame?
 
-    private static let slotColors: [Color] = [.green, .cyan, .yellow, .pink, .orange, .mint]
+    private static let slotColors: [Color] = [.green, .cyan, .yellow, .pink, .purple, .mint]
+
+    /// -1 = a joint of the player's left side, +1 = right side, 0 = the middle.
+    private static func side(of joint: KinectJoint) -> Int {
+        switch joint {
+        case .shoulderLeft, .elbowLeft, .wristLeft, .handLeft, .hipLeft, .kneeLeft, .ankleLeft, .footLeft: return -1
+        case .shoulderRight, .elbowRight, .wristRight, .handRight, .hipRight, .kneeRight, .ankleRight, .footRight: return 1
+        default: return 0
+        }
+    }
 
     var body: some View {
         Canvas { context, size in
@@ -32,7 +41,10 @@ struct SensorPreview: View {
                     var path = Path()
                     path.move(to: pa)
                     path.addLine(to: pb)
-                    context.stroke(path, with: .color(color), lineWidth: 3)
+                    // The player's own left side is orange, right side blue, the middle the slot's colour:
+                    // raise your left hand and the orange arm must go up.
+                    let side = Self.side(of: b)
+                    context.stroke(path, with: .color(side < 0 ? .orange : side > 0 ? .blue : color), lineWidth: 3)
                 }
                 for (index, point) in points.enumerated() {
                     guard let point else { continue }
