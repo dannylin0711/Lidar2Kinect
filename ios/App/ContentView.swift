@@ -175,6 +175,11 @@ struct ContentView: View {
                 Spacer()
                 stateLabel
             }
+            Toggle("Send the camera picture", isOn: $model.sendColor)
+            if !model.sendColor {
+                Text("The camera picture stays on this device. The game still gets the skeleton and the depth image; where it shows the player's camera image it has nothing to show.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             if model.senderStatus.state == .streaming {
                 Row("Receiver", model.senderStatus.receiverName)
                 Row("Sending", streamNames(model.senderStatus.streams))

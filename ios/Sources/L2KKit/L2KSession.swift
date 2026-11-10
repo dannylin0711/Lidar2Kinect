@@ -32,6 +32,34 @@ public final class L2KSession {
 
     private var lastOutput: TimeInterval = 0
     private var lastLocal: TimeInterval = 0
+    private let settingsLock = NSLock()
+    private var wantedColorEnabled = true
+
+    /// Whether the camera picture (the Kinect's colour stream) may be sent to the receiver. Off: the sender no
+    /// longer offers it, so only the skeleton and the depth image leave the device. Safe to set from any thread;
+    /// takes effect at once for what is sent and within a second for what is announced.
+    public var colorEnabled: Bool {
+        get { settingsLock.lock(); defer { settingsLock.unlock() }; return wantedColorEnabled }
+        set {
+            settingsLock.lock()
+            wantedColorEnabled = newValue
+            settingsLock.unlock()
+            if let source { announce(source) }
+        }
+    }
+
+    /// The streams a source can offer, given the colour setting.
+    static func capabilities(providesImages: Bool, colorEnabled: Bool) -> UInt32 {
+        var capabilities = L2K.streamSkeleton | L2K.streamDepth
+        if providesImages && colorEnabled { capabilities |= L2K.streamColor }
+        return capabilities
+    }
+
+    private func announce(_ source: L2KSource) {
+        sender.setIdentity(.init(name: deviceName,
+                                 capabilities: Self.capabilities(providesImages: source.providesImages, colorEnabled: colorEnabled),
+                                 maxTracked: UInt8(source.maxTracked), sourceKind: source.kind))
+    }
 
     public init() {}
 
@@ -39,10 +67,7 @@ public final class L2KSession {
         stop()
         self.source = source
         lastOutput = 0
-        var capabilities = L2K.streamSkeleton | L2K.streamDepth
-        if source.providesImages { capabilities |= L2K.streamColor }
-        sender.setIdentity(.init(name: deviceName, capabilities: capabilities,
-                                 maxTracked: UInt8(source.maxTracked), sourceKind: source.kind))
+        announce(source)
         source.onFrame = { [weak self] frame in self?.handle(frame) }
         do {
             try source.start()
@@ -73,7 +98,7 @@ public final class L2KSession {
         ])
         let wanted = sender.wanted
         let sendDepth = wanted.streams & L2K.streamDepth != 0
-        let sendColor = wanted.streams & L2K.streamColor != 0
+        let sendColor = wanted.streams & L2K.streamColor != 0 && colorEnabled
         // Images only the local consumer wants (a preview) are made at the local rate, not for every frame.
         let localDue = sourceFrame.timestamp - lastLocal >= (1 / localRate) * 0.9
         if localDue { lastLocal = sourceFrame.timestamp }

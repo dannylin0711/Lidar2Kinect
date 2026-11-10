@@ -26,6 +26,15 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-10 (late night, 4) — colour stream can be switched off (Apple side)
+
+- Danny asked for an option to disable the RGB camera feed. App 0.6.2: "Send the camera picture"
+  (Receiver card, on by default, `-l2kSendColor 0`). Off: HELLO no longer offers the colour stream
+  and no colour packet is sent even if the receiver asks (`testColourCanBeSwitchedOff`). The
+  skeleton and the depth image are unaffected; the on-device preview still shows the camera.
+- Windows side: with colour off the game's colour texture gets no frames — the DLL should keep
+  showing black (or its last frame) and must not treat that as a sensor error.
+
 ## 2026-11-10 (late night, 3) — hands lost at times; measuring before changing more (Apple side)
 
 - Danny: the left hand is still missed sometimes. Not yet reproduced or measured on the device.

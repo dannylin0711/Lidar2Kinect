@@ -34,6 +34,12 @@ final class SensorModel: ObservableObject {
             session.pipeline.upperBodyMode = upperBodyOnly
         }
     }
+    @Published var sendColor: Bool {
+        didSet {
+            UserDefaults.standard.set(sendColor, forKey: "l2kSendColor")
+            session.colorEnabled = sendColor
+        }
+    }
     @Published var keepPlayer: Bool {
         didSet {
             UserDefaults.standard.set(keepPlayer, forKey: "l2kKeepPlayer")
@@ -90,6 +96,8 @@ final class SensorModel: ObservableObject {
         previewMode = PreviewMode(rawValue: defaults.string(forKey: "l2kPreview") ?? "") ?? .color // -l2kPreview depth
         upperBodyOnly = defaults.bool(forKey: "l2kUpperBody") // also a launch argument: -l2kUpperBody 1
         keepPlayer = defaults.object(forKey: "l2kKeepPlayer") as? Bool ?? true // -l2kKeepPlayer 0
+        sendColor = defaults.object(forKey: "l2kSendColor") as? Bool ?? true // -l2kSendColor 0
+        session.colorEnabled = sendColor
         session.pipeline.upperBodyMode = upperBodyOnly
         session.pipeline.keepIdentity = keepPlayer
         session.deviceName = UIDevice.current.name

@@ -259,6 +259,75 @@ final class L2KKitTests: XCTestCase {
         print("L2K-VISION hybrid " + mixed.map { String(format: "%d:(%.2f,%.2f,%.2fm,c%d)", $0.source, $0.u, $0.v, $0.depth, $0.confidence) }.joined(separator: " "))
     }
 
+    /// With the colour stream switched off the sender does not offer it and never sends it, even to a receiver that asks.
+    func testColourCanBeSwitchedOff() throws {
+        XCTAssertEqual(L2KSession.capabilities(providesImages: true, colorEnabled: true), L2K.streamSkeleton | L2K.streamDepth | L2K.streamColor)
+        XCTAssertEqual(L2KSession.capabilities(providesImages: true, colorEnabled: false), L2K.streamSkeleton | L2K.streamDepth)
+        XCTAssertEqual(L2KSession.capabilities(providesImages: false, colorEnabled: true), L2K.streamSkeleton | L2K.streamDepth)
+
+        let listener = try NWListener(using: .udp, on: .any)
+        let queue = DispatchQueue(label: "test.receiver.nocolour")
+        let gotDepth = expectation(description: "depth")
+        gotDepth.assertForOverFulfill = false
+        let lock = NSLock()
+        var colourPackets = 0, offered: UInt32 = 0xFFFF_FFFF
+        var seq: UInt32 = 0
+        func receive(on connection: NWConnection) {
+            connection.receiveMessage { data, _, _, error in
+                if let data, !data.isEmpty {
+                    data.withUnsafeBytes { raw in
+                        let bytes = raw.bindMemory(to: UInt8.self).baseAddress!
+                        var header = l2k_header()
+                        guard l2k_decode_header(bytes, raw.count, &header) == 0 else { return }
+                        switch Int32(header.type) {
+                        case Int32(L2K_PKT_HELLO):
+                            var hello = l2k_hello()
+                            _ = l2k_decode_hello(bytes, raw.count, &hello)
+                            lock.lock(); offered = hello.caps; lock.unlock()
+                            var config = l2k_config()
+                            config.streams = L2K.streamSkeleton | L2K.streamDepth | L2K.streamColor // asks for colour regardless
+                            var packet = [UInt8](repeating: 0, count: 128)
+                            seq += 1
+                            let n = l2k_encode_config(&packet, 128, 77, seq, &config)
+                            connection.send(content: Data(packet[0..<n]), completion: .idempotent)
+                        case Int32(L2K_PKT_COLOR):
+                            lock.lock(); colourPackets += 1; lock.unlock()
+                        case Int32(L2K_PKT_DEPTH):
+                            gotDepth.fulfill()
+                        default: break
+                        }
+                    }
+                }
+                if error == nil { receive(on: connection) }
+            }
+        }
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: queue)
+            receive(on: connection)
+        }
+        let ready = expectation(description: "listener ready")
+        listener.stateUpdateHandler = { if case .ready = $0 { ready.fulfill() } }
+        listener.start(queue: queue)
+        wait(for: [ready], timeout: 5)
+        let port = try XCTUnwrap(listener.port?.rawValue)
+
+        let session = L2KSession()
+        session.colorEnabled = false
+        try session.start(SyntheticSource(players: 1))
+        session.sender.connect(host: "127.0.0.1", port: port)
+        wait(for: [gotDepth], timeout: 10)
+        let settle = expectation(description: "one more second of streaming")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.2) { settle.fulfill() }
+        wait(for: [settle], timeout: 5)
+        session.sender.disconnect()
+        session.stop()
+        listener.cancel()
+        lock.lock()
+        defer { lock.unlock() }
+        XCTAssertEqual(colourPackets, 0)
+        XCTAssertEqual(offered, L2K.streamSkeleton | L2K.streamDepth)
+    }
+
     func testPersonTrackerKeepsIdentities() {
         var tracker = VisionPersonTracker()
         func person(_ x: Float) -> VisionPerson { VisionPerson(joints: [], centre: SIMD2(x, 0.5), size: 0.2) }
