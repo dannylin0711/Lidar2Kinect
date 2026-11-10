@@ -23,7 +23,7 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "l2k.source.ultrawide")
     private let motion = CMMotionManager()
-    private let detector = VisionBody3DDetector()
+    private let detector = VisionHybridDetector()
     private let masker = VisionPersonMask()
     private var device: AVCaptureDevice?
     private var lastMask: CVPixelBuffer?
@@ -183,8 +183,14 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             var lines = [String(format: "Camera frames %d (%.0f/s), image %d×%d, roll quadrant %d", frames, rate, Int(width), Int(height), quadrant)]
             lines.append(String(format: "Field of view %.0f° × %.0f° (%@)", 2 * atan(0.5 / camera.fxn) * 180 / .pi, 2 * atan(0.5 / camera.fyn) * 180 / .pi,
                                 intrinsicsFromFrame ? "from the camera" : "from the format"))
-            lines.append("Gravity: \(haveGravity ? "from the motion sensors" : "not available, assuming the device is upright")")
-            lines.append(String(format: "Vision 3D pose: %d joints, %.0f ms; with mask %.0f ms", joints.count, poseMs, visionMs)
+            lines.append("Gravity: \(haveGravity ? "from the motion sensors" : "not available, assuming the device is upright")"
+                         + String(format: ", up in camera space (%.2f %.2f %.2f)", up.x, up.y, up.z))
+            if !joints.isEmpty {
+                // where Vision put each joint in the camera buffer (u right, v down), and how far away
+                lines.append("Joints u,v,m: " + joints.map { String(format: "%d:%.2f,%.2f,%.1f", $0.source, $0.u, $0.v, $0.depth) }.joined(separator: " "))
+            }
+            lines.append(String(format: "Vision 2D + 3D pose: %d joints (%d from the picture, %d from the model), %.0f ms; with mask %.0f ms",
+                                joints.count, detector.lastSeen, detector.lastModelOnly, poseMs, visionMs)
                          + (detector.lastError.map { " — \($0)" } ?? ""))
             if !joints.isEmpty {
                 lines.append(String(format: "Body height %.2f m (%@)", detector.lastHeight, detector.lastHeightMeasured ? "measured" : "assumed"))

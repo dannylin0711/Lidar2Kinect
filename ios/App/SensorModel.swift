@@ -1,5 +1,6 @@
 // App state: owns the capture session, the sender and the receiver discovery, and feeds the UI.
 import CoreImage
+import ImageIO
 import L2KKit
 import L2KShared
 import SwiftUI
@@ -258,11 +259,55 @@ final class Previewer {
                 }
             }
             let skeleton = frame.skeleton
+            if let image { self?.snapshotIfAsked(image, zoom: zoom, skeleton: skeleton) }
             DispatchQueue.main.async { self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics) }
             guard let self else { return }
             self.lock.lock()
             self.building = false
             self.lock.unlock()
+        }
+    }
+
+    /// -l2kSnapshot 1: every two seconds, write the preview picture with the skeleton drawn on it to
+    /// Documents/l2k_snapshot.jpg (for troubleshooting over the cable; nothing is written otherwise).
+    private var lastSnapshot: TimeInterval = 0
+    private func snapshotIfAsked(_ image: CGImage, zoom: CGFloat, skeleton: l2k_skeleton_frame) {
+        guard UserDefaults.standard.bool(forKey: "l2kSnapshot") else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastSnapshot >= 2 else { return }
+        lastSnapshot = now
+        let width = 640, height = 480
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        // Core Graphics has its origin at the bottom-left: flip to the picture's top-left coordinates.
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+        func point(_ p: l2k_vec3) -> CGPoint? {
+            var u: Float = 0, v: Float = 0
+            guard l2k_skeleton_to_depth_pixel(p, 320, 240, &u, &v) == 1 else { return nil }
+            return CGPoint(x: (0.5 + (CGFloat(u) / 320 - 0.5) / zoom) * CGFloat(width), y: (0.5 + (CGFloat(v) / 240 - 0.5) / zoom) * CGFloat(height))
+        }
+        let leftJoints: Set<KinectJoint> = [.shoulderLeft, .elbowLeft, .wristLeft, .handLeft, .hipLeft, .kneeLeft, .ankleLeft, .footLeft]
+        let rightJoints: Set<KinectJoint> = [.shoulderRight, .elbowRight, .wristRight, .handRight, .hipRight, .kneeRight, .ankleRight, .footRight]
+        for (_, body) in skeleton.trackedSkeletons {
+            context.setLineWidth(3)
+            for (a, b) in KinectJoint.bones {
+                guard let pa = point(body.position(of: a)), let pb = point(body.position(of: b)) else { continue }
+                let color: CGColor = leftJoints.contains(b) ? CGColor(red: 1, green: 0.55, blue: 0, alpha: 1)
+                    : rightJoints.contains(b) ? CGColor(red: 0, green: 0.45, blue: 1, alpha: 1) : CGColor(red: 0, green: 1, blue: 0.3, alpha: 1)
+                context.setStrokeColor(color)
+                context.move(to: pa)
+                context.addLine(to: pb)
+                context.strokePath()
+            }
+        }
+        guard let out = context.makeImage(),
+              let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let url = documents.appendingPathComponent("l2k_snapshot.jpg")
+        if let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) {
+            CGImageDestinationAddImage(destination, out, [kCGImageDestinationLossyCompressionQuality: 0.7] as CFDictionary)
+            CGImageDestinationFinalize(destination)
         }
     }
 

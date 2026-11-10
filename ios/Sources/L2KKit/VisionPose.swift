@@ -80,7 +80,7 @@ final class VisionBodyDetector {
         return (request.results ?? []).compactMap { person(from: $0, quadrant: quadrant) }
     }
 
-    private func person(from observation: VNHumanBodyPoseObservation, quadrant: Int32) -> VisionPerson? {
+    func person(from observation: VNHumanBodyPoseObservation, quadrant: Int32) -> VisionPerson? {
         guard let points = try? observation.recognizedPoints(.all) else { return nil }
         func position(_ name: VNHumanBodyPoseObservation.JointName) -> SIMD2<Float>? {
             guard let p = points[name], p.confidence >= minimumConfidence else { return nil }
@@ -112,6 +112,8 @@ struct VisionJoint3D {
     var u: Float
     var v: Float
     var depth: Float
+    /// 2 = seen in the image, 1 = taken from the 3D model only
+    var confidence: UInt8 = 2
 }
 
 /// 3D body pose from the camera image alone (no depth sensor). Vision estimates the joints in metres - with an assumed
@@ -149,6 +151,10 @@ final class VisionBody3DDetector {
         guard let observation = request.results?.first else { return [] }
         lastHeight = observation.bodyHeight
         lastHeightMeasured = observation.heightEstimation == .measured
+        return Self.joints(of: observation, quadrant: quadrant)
+    }
+
+    static func joints(of observation: VNHumanBodyPose3DObservation, quadrant: Int32) -> [VisionJoint3D] {
         var joints: [VisionJoint3D] = []
         for (name, source) in Self.map {
             guard let point = try? observation.pointInImage(name),
@@ -166,8 +172,61 @@ final class VisionBody3DDetector {
         for joint in joints {
             let x = (joint.u - camera.cxn) / camera.fxn * joint.depth
             let y = -(joint.v - camera.cyn) / camera.fyn * joint.depth
-            body.set(joint.source, SIMD3(x, y, -joint.depth), confidence: 2)
+            body.set(joint.source, SIMD3(x, y, -joint.depth), confidence: joint.confidence)
         }
+    }
+}
+
+/// Camera-only 3D pose that stays on the picture: where each joint is in the image comes from Vision's 2D body pose
+/// (its 2D detector follows the body in the image closely), and how far away each joint is comes from Vision's 3D body
+/// pose (which fits a whole-body model and can sit visibly off the picture when the body is close, leaning or cut off
+/// - seen on an iPhone 17 Pro, 2026-11-10). A joint the 2D detector does not see is taken from the 3D model and
+/// reported as estimated.
+final class VisionHybridDetector {
+    private let request2D = VNDetectHumanBodyPoseRequest()
+    private let request3D = VNDetectHumanBodyPose3DRequest()
+    private let detector2D = VisionBodyDetector()
+    private(set) var lastError: String?
+    private(set) var lastHeight: Float = 0
+    private(set) var lastHeightMeasured = false
+    /// How many joints of the last result came from the picture (2D) and how many from the 3D model alone.
+    private(set) var lastSeen = 0, lastModelOnly = 0
+
+    func detect(in image: CVPixelBuffer, quadrant: Int32) -> [VisionJoint3D] {
+        let handler = VNImageRequestHandler(cvPixelBuffer: image, orientation: VisionOrientation.orientation(forQuadrant: quadrant), options: [:])
+        do {
+            try handler.perform([request2D, request3D])
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            return []
+        }
+        guard let observation = request3D.results?.first else { return [] }
+        lastHeight = observation.bodyHeight
+        lastHeightMeasured = observation.heightEstimation == .measured
+        let model = VisionBody3DDetector.joints(of: observation, quadrant: quadrant)
+        guard !model.isEmpty else { return [] }
+        let depth = Dictionary(uniqueKeysWithValues: model.map { ($0.source, $0.depth) })
+        let modelRoot = model.first { $0.source == Int(L2K_SRC_PELVIS) } ?? model[0]
+
+        // The 2D person that is the 3D request's person: the one whose centre is nearest to the model's root.
+        let people = (request2D.results ?? []).compactMap { detector2D.person(from: $0, quadrant: quadrant) }
+        let person = people.min { simd_distance($0.centre, SIMD2(modelRoot.u, modelRoot.v)) < simd_distance($1.centre, SIMD2(modelRoot.u, modelRoot.v)) }
+        var joints: [VisionJoint3D] = []
+        var seen = Set<Int>()
+        if let person, simd_distance(person.centre, SIMD2(modelRoot.u, modelRoot.v)) < 0.25 {
+            for joint in person.joints {
+                guard let d = depth[joint.source] ?? depth[Int(L2K_SRC_PELVIS)] else { continue }
+                joints.append(VisionJoint3D(source: joint.source, u: joint.u, v: joint.v, depth: d, confidence: 2))
+                seen.insert(joint.source)
+            }
+        }
+        lastSeen = joints.count
+        for joint in model where !seen.contains(joint.source) {
+            joints.append(VisionJoint3D(source: joint.source, u: joint.u, v: joint.v, depth: joint.depth, confidence: 1))
+        }
+        lastModelOnly = joints.count - lastSeen
+        return joints
     }
 }
 

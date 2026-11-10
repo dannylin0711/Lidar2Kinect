@@ -253,6 +253,10 @@ final class L2KKitTests: XCTestCase {
         let joints = detector.detect(in: pixels, quadrant: 0)
         print("L2K-VISION 3D joints: \(joints.count) height \(detector.lastHeight) error \(detector.lastError ?? "none")")
         print("L2K-VISION 3D " + joints.map { String(format: "%d:(%.2f,%.2f,%.2fm)", $0.source, $0.u, $0.v, $0.depth) }.joined(separator: " "))
+        let hybrid = VisionHybridDetector()
+        let mixed = hybrid.detect(in: pixels, quadrant: 0)
+        print("L2K-VISION hybrid joints: \(mixed.count), from the picture \(hybrid.lastSeen), from the model \(hybrid.lastModelOnly)")
+        print("L2K-VISION hybrid " + mixed.map { String(format: "%d:(%.2f,%.2f,%.2fm,c%d)", $0.source, $0.u, $0.v, $0.depth, $0.confidence) }.joined(separator: " "))
     }
 
     func testPersonTrackerKeepsIdentities() {
