@@ -377,6 +377,78 @@ final class L2KKitTests: XCTestCase {
         XCTAssertFalse(first.contains(fourth[1]))
     }
 
+    /// The sender against `L2KReceiver` on localhost: the receiver's frames carry the sender's skeletons and depth image.
+    func testReceiverGetsFramesFromSender() throws {
+        let receiver = L2KReceiver()
+        receiver.name = "unit game"
+        receiver.streams = L2K.streamSkeleton | L2K.streamDepth | L2K.streamColor
+        let listening = expectation(description: "listening")
+        listening.assertForOverFulfill = false
+        let receiving = expectation(description: "receiving")
+        receiving.assertForOverFulfill = false
+        let gotTracked = expectation(description: "tracked skeleton")
+        gotTracked.assertForOverFulfill = false
+        let gotDepth = expectation(description: "depth image")
+        gotDepth.assertForOverFulfill = false
+        let gotColor = expectation(description: "colour image")
+        gotColor.assertForOverFulfill = false
+        let lock = NSLock()
+        var port: UInt16 = 0
+        var lastStatus = L2KReceiver.Status()
+        var numbers: [UInt32] = []
+        receiver.onStatus = { status in
+            lock.lock(); lastStatus = status; if status.port != 0 { port = status.port }; lock.unlock()
+            if status.state == .listening { listening.fulfill() }
+            if status.state == .receiving, status.senderName == "unit test" { receiving.fulfill() }
+        }
+        receiver.onFrame = { frame in
+            lock.lock(); numbers.append(frame.skeleton.frame_number); lock.unlock()
+            if frame.skeleton.trackedSkeletons.count == 2 { gotTracked.fulfill() }
+            if let depth = frame.depth {
+                XCTAssertEqual(depth.count, 320 * 240)
+                if depth.filter({ l2k_depth_player($0) != 0 }).count > 1500 { gotDepth.fulfill() }
+            }
+            if let color = frame.color {
+                XCTAssertEqual(color.extent.width, 640)
+                XCTAssertEqual(color.extent.height, 480)
+                gotColor.fulfill()
+            }
+        }
+        receiver.start(port: 0, advertise: false)
+        wait(for: [listening], timeout: 5)
+        lock.lock(); let listenPort = port; lock.unlock()
+        XCTAssertNotEqual(listenPort, 0)
+
+        let session = L2KSession()
+        session.deviceName = "unit test"
+        let streaming = expectation(description: "sender streaming")
+        streaming.assertForOverFulfill = false
+        session.sender.onStatus = { status in
+            if status.state == .streaming {
+                XCTAssertEqual(status.receiverName, "unit game")
+                streaming.fulfill()
+            }
+        }
+        try session.start(SyntheticSource(players: 2))
+        session.sender.connect(host: "127.0.0.1", port: listenPort)
+        wait(for: [streaming, receiving, gotTracked, gotDepth, gotColor], timeout: 10)
+        lock.lock()
+        XCTAssertEqual(lastStatus.streams, L2K.streamSkeleton | L2K.streamDepth | L2K.streamColor)
+        XCTAssertEqual(lastStatus.sourceKind, UInt8(L2K_SOURCE_SYNTHETIC))
+        XCTAssertEqual(numbers, numbers.sorted(), "frames are delivered in order")
+        XCTAssertEqual(Set(numbers).count, numbers.count, "no frame twice")
+        lock.unlock()
+
+        // the sender says BYE: the receiver goes back to listening
+        let backToListening = expectation(description: "listening again")
+        backToListening.assertForOverFulfill = false
+        receiver.onStatus = { if $0.state == .listening { backToListening.fulfill() } }
+        session.sender.disconnect()
+        wait(for: [backToListening], timeout: 5)
+        session.stop()
+        receiver.stop()
+    }
+
     /// The sender against a minimal receiver on localhost: HELLO -> CONFIG -> the requested streams arrive and decode.
     func testSenderHandshakeAndStreams() throws {
         let listener = try NWListener(using: .udp, on: .any)

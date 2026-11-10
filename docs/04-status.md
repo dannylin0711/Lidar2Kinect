@@ -26,6 +26,19 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-11 — `L2KReceiver`: a game port can take its sensor from another device (Apple side)
+
+- Danny asked for the Dance Evolution iPad port to accept the sensor feed of another device.
+- `ios/Sources/L2KKit/L2KReceiver.swift`: the receiving end of L2K1 in Swift. Opens the UDP port
+  (24810 by default), optionally advertises `_l2k._udp`, answers HELLO with CONFIG
+  (`L2K_CONSUMER_GAME_PORT`), takes one sender at a time (a second device is ignored while the first
+  is alive, 3 s timeout, BYE honoured), drops late or repeated skeleton datagrams, reassembles and
+  decodes the depth image (D1 or raw) and the JPEG colour image, and hands out `L2KFrame`s like an
+  in-process `L2KSession` does. No protocol change.
+- Verified: `testReceiverGetsFramesFromSender` (the real sender against the receiver on localhost:
+  two tracked skeletons, depth with player pixels, 640x480 colour, frames in order, back to listening
+  after BYE). Not yet run between two devices.
+
 ## 2026-11-10 (late night, 6) — preview overlay follows the real player again (Apple side)
 
 - 0.7.0 drew the skeleton over the camera picture from the skeleton the game is told about. With the
