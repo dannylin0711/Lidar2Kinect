@@ -48,8 +48,20 @@ final class SensorModel: ObservableObject {
     }
     /// Where the player really stands (metres from the sensor), before the play-area fit.
     @Published var realDistance: Float?
-    /// Per slot: how far the play-area fit moved the body the game is told about (zero when untouched).
-    @Published var fitShift: [SIMD3<Float>] = []
+    /// The skeletons as the camera sees them (before the fit / the normalising), for drawing over the picture.
+    @Published var pictureSkeleton: l2k_skeleton_frame?
+    @Published var normalize: Bool {
+        didSet {
+            UserDefaults.standard.set(normalize, forKey: "l2kNormalize")
+            session.pipeline.normalize = normalize
+        }
+    }
+    @Published var normalizePlayers: Int {
+        didSet {
+            UserDefaults.standard.set(normalizePlayers, forKey: "l2kNormalizePlayers")
+            session.pipeline.normalizePlayers = normalizePlayers
+        }
+    }
     @Published var keepPlayer: Bool {
         didSet {
             UserDefaults.standard.set(keepPlayer, forKey: "l2kKeepPlayer")
@@ -107,8 +119,12 @@ final class SensorModel: ObservableObject {
         upperBodyOnly = defaults.bool(forKey: "l2kUpperBody") // also a launch argument: -l2kUpperBody 1
         keepPlayer = defaults.object(forKey: "l2kKeepPlayer") as? Bool ?? true // -l2kKeepPlayer 0
         sendColor = defaults.object(forKey: "l2kSendColor") as? Bool ?? true // -l2kSendColor 0
+        normalize = defaults.bool(forKey: "l2kNormalize") // -l2kNormalize 1
+        normalizePlayers = defaults.object(forKey: "l2kNormalizePlayers") as? Int ?? 1 // -l2kNormalizePlayers 2
         fitPlayArea = defaults.object(forKey: "l2kFitArea") as? Bool ?? true // -l2kFitArea 0
         session.pipeline.fitPlayArea = fitPlayArea
+        session.pipeline.normalize = normalize
+        session.pipeline.normalizePlayers = normalizePlayers
         session.colorEnabled = sendColor
         session.pipeline.upperBodyMode = upperBodyOnly
         session.pipeline.keepIdentity = keepPlayer
@@ -123,10 +139,10 @@ final class SensorModel: ObservableObject {
         }
         discovery.onChange = { [weak self] receivers in self?.receivers = receivers }
         discovery.start()
-        previewer.onPreview = { [weak self] image, zoom, skeleton, rate, status, diagnostics, distance, shift in
+        previewer.onPreview = { [weak self] image, zoom, skeleton, rate, status, diagnostics, distance, picture in
             guard let self else { return }
             self.realDistance = distance
-            self.fitShift = shift
+            self.pictureSkeleton = picture
             self.preview = image
             self.shownZoom = zoom
             self.skeleton = skeleton
@@ -241,7 +257,7 @@ final class SensorModel: ObservableObject {
 /// Turns frames into preview images on the capture queue, at most 15 times per second.
 final class Previewer {
     /// Called on the main queue.
-    var onPreview: ((CGImage?, CGFloat, l2k_skeleton_frame, Double, String, [String], Float?, [SIMD3<Float>]) -> Void)?
+    var onPreview: ((CGImage?, CGFloat, l2k_skeleton_frame, Double, String, [String], Float?, l2k_skeleton_frame?) -> Void)?
     var context: CIContext?
     weak var source: L2KSource?
 
@@ -304,8 +320,8 @@ final class Previewer {
             let skeleton = frame.skeleton
             if let image { self?.snapshotIfAsked(image, zoom: zoom, skeleton: skeleton) }
             let distance = frame.realDistance
-            let shift = frame.fitShift
-            DispatchQueue.main.async { self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics, distance, shift) }
+            let picture = frame.pictureSkeleton
+            DispatchQueue.main.async { self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics, distance, picture) }
             guard let self else { return }
             self.lock.lock()
             self.building = false

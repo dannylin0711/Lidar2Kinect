@@ -24,9 +24,9 @@ public struct L2KFrame {
     public var colorPreviewZoom: Float = 1
     /// Where the first body really stands: its level distance from the sensor in metres, before any play-area fit.
     public var realDistance: Float?
-    /// Per skeleton slot: what the play-area fit added to the body (zero when untouched). Subtract it to draw the
-    /// skeleton over the camera picture, where the player really is.
-    public var fitShift: [SIMD3<Float>] = []
+    /// The skeletons as the camera sees them, before the play-area fit or the normalising moved them: draw these
+    /// over the camera picture. Equal to `skeleton` when neither is on.
+    public var pictureSkeleton: l2k_skeleton_frame?
 }
 
 /// The raw depth map resampled to the virtual Kinect image (320x240).
@@ -53,6 +53,23 @@ public final class L2KPipeline {
     public var fitPlayArea: Bool {
         get { settingsLock.lock(); defer { settingsLock.unlock() }; return wantedFitPlayArea }
         set { settingsLock.lock(); wantedFitPlayArea = newValue; settingsLock.unlock() }
+    }
+
+    private var wantedNormalize = false
+    private var wantedNormalizePlayers = 1
+
+    /// Report the players on Dance Evolution's own standing points, seen by a level sensor (`l2k_map_params.normalize`):
+    /// one player 2.5 m in front of the sensor, two players 0.61 m either side of that. Replaces the fit when on.
+    /// Safe to set from any thread.
+    public var normalize: Bool {
+        get { settingsLock.lock(); defer { settingsLock.unlock() }; return wantedNormalize }
+        set { settingsLock.lock(); wantedNormalize = newValue; settingsLock.unlock() }
+    }
+
+    /// How many players the game is told about when normalising (1 or 2). Safe to set from any thread.
+    public var normalizePlayers: Int {
+        get { settingsLock.lock(); defer { settingsLock.unlock() }; return wantedNormalizePlayers }
+        set { settingsLock.lock(); wantedNormalizePlayers = max(1, min(2, newValue)); settingsLock.unlock() }
     }
 
     /// The play area Dance Evolution accepts a player in (read from the game, docs/01 section 8), in metres.
@@ -89,6 +106,8 @@ public final class L2KPipeline {
         mapper.params.upper_body = upperBodyMode ? 1 : 0
         mapper.params.keep_identity = keepIdentity ? 1 : 0
         mapper.params.fit_play_area = fitPlayArea ? 1 : 0
+        mapper.params.normalize = normalize ? 1 : 0
+        mapper.params.norm_players = UInt8(normalizePlayers)
         var skeleton = l2k_skeleton_frame()
         let up = l2k_vec3(x: source.upCamera.x, y: source.upCamera.y, z: source.upCamera.z)
         source.bodies.withUnsafeBufferPointer { bodies in
@@ -97,7 +116,9 @@ public final class L2KPipeline {
         }
         var frame = L2KFrame(skeleton: skeleton, depth: nil, color: nil, quadrant: q)
         frame.realDistance = Self.realDistance(of: source.bodies.first, quadrant: q, up: skeleton.up)
-        frame.fitShift = withUnsafeBytes(of: mapper.fit_shift) { $0.bindMemory(to: l2k_vec3.self).map { SIMD3($0.x, $0.y, $0.z) } }
+        var picture = skeleton
+        picture.skeletons = mapper.picture
+        frame.pictureSkeleton = picture
         if wantDepth {
             frame.depth = depthImage(source, skeleton: &skeleton, quadrant: q, playersOnly: playersOnly)
         }

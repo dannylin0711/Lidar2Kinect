@@ -42,6 +42,12 @@ void l2k_map_params_default(l2k_map_params *p) {
     p->area_half_width = 1.15f; /* the game accepts +-1.25 m */
     p->area_hip_min = 0.40f;    /* the game accepts a hip 0 .. 2 m above its floor */
     p->area_hip_max = 1.60f;
+    p->normalize = 0;
+    p->norm_players = 1;
+    p->norm_distance = 2.5f;       /* the game's world origin: the middle of its play area */
+    p->norm_spacing = 0.61f;       /* its two-player standing points */
+    p->norm_follow_seconds = 2.0f;
+    p->norm_reach = 0.5f;          /* the play area reaches 0.7 m before and behind, 1.25 m either side */
 }
 
 void l2k_mapper_init(l2k_mapper *m, const l2k_map_params *params) {
@@ -284,6 +290,117 @@ static uint32_t new_out_id(l2k_mapper *m) {
     return m->next_out_id;
 }
 
+static void shift_skeleton(l2k_skeleton *sk, l2k_vec3 shift) {
+    int j;
+    sk->position = v_add(sk->position, shift);
+    for (j = 0; j < L2K_JOINT_COUNT; j++) sk->joints[j] = v_add(sk->joints[j], shift);
+}
+
+/* Turn p about the sensor by the rotation that takes the unit vector `up` to the y axis. */
+static l2k_vec3 level_point(l2k_vec3 p, l2k_vec3 up) {
+    l2k_vec3 axis = {-up.z, 0.0f, up.x}; /* up x (0,1,0) */
+    float s = v_len(axis), c = up.y;
+    l2k_vec3 k, r;
+    if (s < 1e-6f) return p;
+    k = v_scale(axis, 1.0f / s);
+    r = v_add(v_add(v_scale(p, c), v_scale(v_cross(k, p), s)), v_scale(k, v_dot(k, p) * (1.0f - c)));
+    return r;
+}
+
+/* See "Normalising" in l2k_map.h. */
+static void normalize_frame(l2k_mapper *m, l2k_skeleton_frame *out, l2k_vec3 up, uint64_t timestamp_us) {
+    const l2k_map_params *p = &m->params;
+    int chosen[2] = {-1, -1}, count = 0, wanted = p->norm_players >= 2 ? 2 : 1, s, j, i;
+    float dt = 1.0f / 30.0f, alpha;
+
+    if (m->norm_last_us && timestamp_us > m->norm_last_us) {
+        dt = (float)(timestamp_us - m->norm_last_us) * 1e-6f;
+        if (dt > 0.5f) dt = 0.5f;
+    }
+    m->norm_last_us = timestamp_us;
+    alpha = p->norm_follow_seconds > 0.0f ? 1.0f - expf(-dt / p->norm_follow_seconds) : 1.0f;
+
+    /* a level sensor */
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+        l2k_skeleton *sk = &out->skeletons[s];
+        if (sk->state == L2K_SKELETON_NOT_TRACKED) continue;
+        sk->position = level_point(sk->position, up);
+        for (j = 0; j < L2K_JOINT_COUNT; j++) sk->joints[j] = level_point(sk->joints[j], up);
+    }
+    out->up.x = 0.0f; out->up.y = 1.0f; out->up.z = 0.0f;
+    if (out->flags & L2K_FRAME_FLOOR_VALID) {
+        out->floor_plane.x = 0.0f; out->floor_plane.y = 1.0f; out->floor_plane.z = 0.0f;
+    }
+
+    /* the players: those whose identity is the oldest */
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+        if (out->skeletons[s].state == L2K_SKELETON_NOT_TRACKED) continue;
+        for (i = 0; i < count; i++) {
+            if (m->out_id[s] < m->out_id[chosen[i]]) break;
+        }
+        if (i >= wanted) continue;
+        for (j = (count < wanted ? count : wanted - 1); j > i; j--) chosen[j] = chosen[j - 1];
+        chosen[i] = s;
+        if (count < wanted) count++;
+    }
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+        if (s == chosen[0] || s == chosen[1]) continue;
+        if (out->skeletons[s].state != L2K_SKELETON_NOT_TRACKED) memset(&out->skeletons[s], 0, sizeof out->skeletons[s]);
+        m->anchor[s].valid = 0;
+        m->anchor[s].side = 0;
+    }
+
+    /* each player's standing point follows where the player is */
+    for (i = 0; i < count; i++) {
+        l2k_skeleton *sk = &out->skeletons[chosen[i]];
+        float dx, dz, d;
+        s = chosen[i];
+        if (!m->anchor[s].valid) {
+            m->anchor[s].x = sk->position.x;
+            m->anchor[s].z = sk->position.z;
+            m->anchor[s].valid = 1;
+            m->anchor[s].side = 0;
+        } else {
+            m->anchor[s].x += (sk->position.x - m->anchor[s].x) * alpha;
+            m->anchor[s].z += (sk->position.z - m->anchor[s].z) * alpha;
+        }
+        dx = sk->position.x - m->anchor[s].x;
+        dz = sk->position.z - m->anchor[s].z;
+        d = sqrtf(dx * dx + dz * dz);
+        if (d > p->norm_reach && d > 0.0f) { /* a long stride: the standing point comes along */
+            m->anchor[s].x = sk->position.x - dx * p->norm_reach / d;
+            m->anchor[s].z = sk->position.z - dz * p->norm_reach / d;
+        }
+    }
+
+    /* two players: each keeps the side they stand on */
+    if (wanted == 2) {
+        if (count == 2 && (m->anchor[chosen[0]].side == 0 || m->anchor[chosen[1]].side == 0 ||
+                           m->anchor[chosen[0]].side == m->anchor[chosen[1]].side)) {
+            int first_is_lower = m->anchor[chosen[0]].x <= m->anchor[chosen[1]].x;
+            if (m->anchor[chosen[0]].side != 0 && m->anchor[chosen[1]].side == 0) {
+                m->anchor[chosen[1]].side = (int8_t)-m->anchor[chosen[0]].side; /* the newcomer takes the free side */
+            } else if (m->anchor[chosen[1]].side != 0 && m->anchor[chosen[0]].side == 0) {
+                m->anchor[chosen[0]].side = (int8_t)-m->anchor[chosen[1]].side;
+            } else {
+                m->anchor[chosen[0]].side = (int8_t)(first_is_lower ? -1 : 1);
+                m->anchor[chosen[1]].side = (int8_t)(first_is_lower ? 1 : -1);
+            }
+        } else if (count == 1 && m->anchor[chosen[0]].side == 0) {
+            m->anchor[chosen[0]].side = (int8_t)(m->anchor[chosen[0]].x < 0.0f ? -1 : 1);
+        }
+    }
+
+    for (i = 0; i < count; i++) {
+        l2k_vec3 shift;
+        s = chosen[i];
+        shift.x = (wanted == 2 ? (float)m->anchor[s].side * p->norm_spacing : 0.0f) - m->anchor[s].x;
+        shift.y = 0.0f;
+        shift.z = p->norm_distance - m->anchor[s].z;
+        shift_skeleton(&out->skeletons[s], shift);
+    }
+}
+
 void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l2k_vec3 up_camera,
                     int quadrant, uint64_t timestamp_us, uint8_t source_kind, l2k_skeleton_frame *out) {
     l2k_vec3 up_default = {0, 1, 0};
@@ -391,32 +508,6 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
         }
     }
 
-    /* 4b. play area: a tracked body outside it slides horizontally to just inside */
-    for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
-        if (out->skeletons[s].state == L2K_SKELETON_TRACKED) memset(&m->fit_shift[s], 0, sizeof m->fit_shift[s]);
-    }
-    if (m->params.fit_play_area) {
-        l2k_vec3 z_axis = {0, 0, 1}, x_default = {1, 0, 0};
-        l2k_vec3 forward = v_unit(v_sub(z_axis, v_scale(up, v_dot(z_axis, up))), z_axis); /* level, away from the sensor */
-        l2k_vec3 side = v_unit(v_cross(up, forward), x_default);
-        for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
-            l2k_skeleton *sk = &out->skeletons[s];
-            float d, x, d2, x2;
-            l2k_vec3 shift;
-            if (sk->state != L2K_SKELETON_TRACKED) continue;
-            d = v_dot(sk->position, forward);
-            x = v_dot(sk->position, side);
-            d2 = d < m->params.area_near ? m->params.area_near : d > m->params.area_far ? m->params.area_far : d;
-            x2 = x < -m->params.area_half_width ? -m->params.area_half_width : x > m->params.area_half_width ? m->params.area_half_width : x;
-            if (d2 == d && x2 == x) continue;
-            shift = v_add(v_scale(forward, d2 - d), v_scale(side, x2 - x));
-            sk->position = v_add(sk->position, shift);
-            for (j = 0; j < L2K_JOINT_COUNT; j++) sk->joints[j] = v_add(sk->joints[j], shift);
-            m->last[s] = *sk; /* a held skeleton is held where the game saw it */
-            m->fit_shift[s] = shift;
-        }
-    }
-
     /* 5. a player not tracked in this frame is held at the last skeleton for a short while */
     for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
         uint64_t absent;
@@ -439,7 +530,7 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
         }
     }
     /* play area, vertically: the floor the game is told about must put the first player's hip at a human height */
-    if (m->params.fit_play_area && !m->floor_fixed) {
+    if ((m->params.fit_play_area || m->params.normalize) && !m->floor_fixed) {
         for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
             float hip;
             if (out->skeletons[s].state != L2K_SKELETON_TRACKED) continue;
@@ -461,6 +552,32 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
         out->floor_plane.y = up.y;
         out->floor_plane.z = up.z;
         out->floor_plane.w = m->sensor_height;
+    }
+
+    /* 6. where the game is told the players are */
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) m->picture[s] = out->skeletons[s];
+    if (m->params.normalize) {
+        normalize_frame(m, out, up, timestamp_us);
+    } else if (m->params.fit_play_area) {
+        /* play area: a body outside it slides horizontally to just inside */
+        l2k_vec3 z_axis = {0, 0, 1}, x_default = {1, 0, 0};
+        l2k_vec3 forward = v_unit(v_sub(z_axis, v_scale(up, v_dot(z_axis, up))), z_axis); /* level, away from the sensor */
+        l2k_vec3 side = v_unit(v_cross(up, forward), x_default);
+        for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+            l2k_skeleton *sk = &out->skeletons[s];
+            float d, x, d2, x2;
+            if (sk->state == L2K_SKELETON_NOT_TRACKED) continue;
+            d = v_dot(sk->position, forward);
+            x = v_dot(sk->position, side);
+            d2 = d < m->params.area_near ? m->params.area_near : d > m->params.area_far ? m->params.area_far : d;
+            x2 = x < -m->params.area_half_width ? -m->params.area_half_width : x > m->params.area_half_width ? m->params.area_half_width : x;
+            if (d2 == d && x2 == x) continue;
+            shift_skeleton(sk, v_add(v_scale(forward, d2 - d), v_scale(side, x2 - x)));
+        }
+    }
+    if (!m->params.normalize) {
+        for (s = 0; s < L2K_SKELETON_SLOTS; s++) m->anchor[s].valid = 0;
+        m->norm_last_us = 0;
     }
 }
 

@@ -26,6 +26,19 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-11 (2) — normalising for Dance Evolution (Apple side)
+
+- Danny asked for an option that sends the skeleton at the optimal position for the game.
+- **`shared/` addition** (`docs/03`, "Normalising"): `l2k_map_params.normalize`, `norm_players`,
+  `norm_distance` 2.5, `norm_spacing` 0.61, `norm_follow_seconds` 2, `norm_reach` 0.5; the mapper
+  levels the frame, puts one player at (0, 2.5 m) or two at ±0.61 m, keeps short movements, drops
+  other bodies. `l2k_mapper.picture` (pre-fit skeletons) replaces `fit_shift`. The fit is now a final
+  pass over tracked and held bodies. No packet change. 1136 checks.
+- App 0.8.0: "Best position for Dance Evolution" with 1 / 2 players (off by default; `-l2kNormalize 1`,
+  `-l2kNormalizePlayers 2`); the picture overlay draws the real skeletons, the top view the reported
+  ones. Checked in the simulator with two test figures. **Not tried in the game or on a person.**
+- `L2KReceiver` now hands out one frame without bodies when the sender goes away.
+
 ## 2026-11-11 — `L2KReceiver`: a game port can take its sensor from another device (Apple side)
 
 - Danny asked for the Dance Evolution iPad port to accept the sensor feed of another device.

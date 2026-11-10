@@ -592,11 +592,11 @@ static void test_play_area(void) {
     CHECK(nearly(f.skeletons[0].position.x, -1.15f, 1e-5f));
     CHECK(nearly(f.skeletons[0].position.y, ref.skeletons[0].position.y, 1e-6f)); /* never moved vertically */
     /* the mapper says how far it moved the body, so a preview can draw it where it really is */
-    CHECK(nearly(f.skeletons[0].position.x - m.fit_shift[0].x, ref.skeletons[0].position.x, 1e-5f));
-    CHECK(nearly(f.skeletons[0].position.z - m.fit_shift[0].z, ref.skeletons[0].position.z, 1e-5f));
-    CHECK(m.fit_shift[0].y == 0.0f && m.fit_shift[1].x == 0.0f && m.fit_shift[1].z == 0.0f);
-    l2k_mapper_map(&m, &body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f); /* back inside: no shift left over */
-    CHECK(m.fit_shift[0].x == 0.0f && m.fit_shift[0].z == 0.0f);
+    CHECK(nearly(m.picture[0].position.x, ref.skeletons[0].position.x, 1e-6f));
+    CHECK(nearly(m.picture[0].position.z, ref.skeletons[0].position.z, 1e-6f));
+    for (j = 0; j < L2K_JOINT_COUNT; j++) CHECK(nearly(m.picture[0].joints[j].x, ref.skeletons[0].joints[j].x, 1e-6f));
+    l2k_mapper_map(&m, &body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f); /* back inside: reported where it is */
+    CHECK(nearly(m.picture[0].position.x, f.skeletons[0].position.x, 0.0f) && nearly(m.picture[0].position.z, f.skeletons[0].position.z, 0.0f));
     for (j = 0; j < L2K_JOINT_COUNT; j++) {
         CHECK(nearly(f.skeletons[0].joints[j].x - f.skeletons[0].position.x, ref.skeletons[0].joints[j].x - ref.skeletons[0].position.x, 1e-5f));
         CHECK(nearly(f.skeletons[0].joints[j].y, ref.skeletons[0].joints[j].y, 1e-6f));
@@ -632,6 +632,122 @@ static void test_play_area(void) {
     l2k_mapper_init(&m, NULL);
     l2k_mapper_map(&m, &body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
     CHECK(!(f.flags & L2K_FRAME_FLOOR_VALID)); /* without the option: no floor is claimed */
+}
+
+static int tracked_count(const l2k_skeleton_frame *f) {
+    int s, n = 0;
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) n += f->skeletons[s].state == L2K_SKELETON_TRACKED;
+    return n;
+}
+
+static int first_tracked(const l2k_skeleton_frame *f) {
+    int s;
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) if (f->skeletons[s].state == L2K_SKELETON_TRACKED) return s;
+    return -1;
+}
+
+static void test_normalize(void) {
+    l2k_mapper m;
+    l2k_map_params prm;
+    l2k_src_body body, moved, pair[2];
+    l2k_skeleton_frame ref, f;
+    l2k_vec3 up = {0, 1, 0};
+    l2k_vec3 up_tilted = {0.0f, 0.8660254f, 0.5f}; /* camera space: the sensor looks 30 degrees down */
+    uint64_t t = 1000000;
+    int i, j, a, b;
+
+    l2k_map_params_default(&prm);
+    CHECK(prm.normalize == 0 && prm.norm_players == 1 && nearly(prm.norm_distance, 2.5f, 0.0f) && nearly(prm.norm_spacing, 0.61f, 0.0f));
+    prm.normalize = 1;
+
+    /* a body 1.2 m from a tilted sensor and 2 m to one side: reported at the standing point, by a level sensor */
+    l2k_synth_body(0.0, 0, 1, &body);
+    moved = body;
+    for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) { moved.p[i].z += 1.3f; moved.p[i].x += 2.0f; }
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_map(&m, &moved, 1, up_tilted, 0, t, L2K_SOURCE_SYNTHETIC, &ref);
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &moved, 1, up_tilted, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(tracked_count(&f) == 1);
+    CHECK(nearly(f.skeletons[0].position.x, 0.0f, 1e-4f));
+    CHECK(nearly(f.skeletons[0].position.z, 2.5f, 1e-4f));
+    CHECK(nearly(f.up.x, 0.0f, 0.0f) && nearly(f.up.y, 1.0f, 0.0f) && nearly(f.up.z, 0.0f, 0.0f));
+    CHECK(nearly(l2k_elevation_degrees(f.up), 0.0f, 1e-4f));
+    CHECK((f.flags & L2K_FRAME_FLOOR_VALID) && nearly(f.floor_plane.y, 1.0f, 0.0f) && nearly(f.floor_plane.w, ref.floor_plane.w, 1e-5f));
+    for (j = 0; j < L2K_JOINT_COUNT; j++) {
+        /* heights above the floor are the ones measured along the real up */
+        float h = ref.skeletons[0].joints[j].x * ref.up.x + ref.skeletons[0].joints[j].y * ref.up.y + ref.skeletons[0].joints[j].z * ref.up.z;
+        CHECK(nearly(f.skeletons[0].joints[j].y, h, 1e-4f));
+        /* the body's shape is unchanged: every joint as far from the hip centre as before */
+        {
+            float dx0 = ref.skeletons[0].joints[j].x - ref.skeletons[0].joints[0].x, dy0 = ref.skeletons[0].joints[j].y - ref.skeletons[0].joints[0].y,
+                  dz0 = ref.skeletons[0].joints[j].z - ref.skeletons[0].joints[0].z;
+            float dx1 = f.skeletons[0].joints[j].x - f.skeletons[0].joints[0].x, dy1 = f.skeletons[0].joints[j].y - f.skeletons[0].joints[0].y,
+                  dz1 = f.skeletons[0].joints[j].z - f.skeletons[0].joints[0].z;
+            CHECK(nearly(sqrtf(dx0 * dx0 + dy0 * dy0 + dz0 * dz0), sqrtf(dx1 * dx1 + dy1 * dy1 + dz1 * dz1), 1e-4f));
+        }
+        /* and the picture copy is the untouched skeleton */
+        CHECK(nearly(m.picture[0].joints[j].z, ref.skeletons[0].joints[j].z, 1e-6f));
+    }
+
+    /* a step to the side is reported as a step; standing there, the player is brought back to the middle */
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &body, 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(nearly(f.skeletons[0].position.x, 0.0f, 1e-5f) && nearly(f.skeletons[0].position.z, 2.5f, 1e-5f));
+    moved = body;
+    for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) moved.p[i].x += 0.3f;
+    t += 33333;
+    l2k_mapper_map(&m, &moved, 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(fabsf(f.skeletons[0].position.x) > 0.28f && fabsf(f.skeletons[0].position.x) < 0.3001f);
+    for (i = 0; i < 300; i++) { /* ten seconds */
+        t += 33333;
+        l2k_mapper_map(&m, &moved, 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    }
+    CHECK(fabsf(f.skeletons[0].position.x) < 0.01f);
+
+    /* a long stride: never reported farther than the reach from the standing point, so never outside the play area */
+    for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) moved.p[i].x += 2.0f;
+    t += 33333;
+    l2k_mapper_map(&m, &moved, 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(fabsf(f.skeletons[0].position.x) <= prm.norm_reach + 1e-4f && fabsf(f.skeletons[0].position.x) > 0.4f);
+
+    /* pinned hips */
+    prm.norm_follow_seconds = 0.0f;
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &body, 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    t += 33333;
+    l2k_mapper_map(&m, &moved, 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(nearly(f.skeletons[0].position.x, 0.0f, 1e-4f));
+    prm.norm_follow_seconds = 2.0f;
+
+    /* one-player game, two bodies in view: only the player who was there first is sent */
+    l2k_synth_body(0.0, 0, 2, &pair[0]);
+    l2k_synth_body(0.0, 1, 2, &pair[1]);
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &pair[0], 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    t += 33333;
+    l2k_mapper_map(&m, pair, 2, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(tracked_count(&f) == 1);
+    a = first_tracked(&f);
+    CHECK(a >= 0 && nearly(f.skeletons[a].position.x, 0.0f, 1e-4f) && nearly(f.skeletons[a].position.z, 2.5f, 1e-4f));
+    CHECK(f.skeletons[a].tracking_id == 1);
+    CHECK(m.picture[0].state == L2K_SKELETON_TRACKED && m.picture[1].state == L2K_SKELETON_TRACKED); /* the picture keeps both */
+
+    /* two-player game: each on the standing point of the side they stand on */
+    prm.norm_players = 2;
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_map(&m, pair, 2, up, 0, t, L2K_SOURCE_SYNTHETIC, &ref);
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, pair, 2, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(tracked_count(&f) == 2);
+    a = ref.skeletons[0].position.x < ref.skeletons[1].position.x ? 0 : 1;
+    b = 1 - a;
+    CHECK(nearly(f.skeletons[a].position.x, -0.61f, 1e-4f) && nearly(f.skeletons[b].position.x, 0.61f, 1e-4f));
+    CHECK(nearly(f.skeletons[a].position.z, 2.5f, 1e-4f) && nearly(f.skeletons[b].position.z, 2.5f, 1e-4f));
+    /* one of the two alone keeps the side */
+    t += 5000000; /* the other has been gone long enough not to be held */
+    l2k_mapper_map(&m, &pair[b], 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(tracked_count(&f) == 1 && nearly(f.skeletons[first_tracked(&f)].position.x, 0.61f, 0.05f));
 }
 
 static void test_virtual_camera(void) {
@@ -847,6 +963,7 @@ int main(int argc, char **argv) {
     test_mapping();
     test_upper_body();
     test_play_area();
+    test_normalize();
     test_virtual_camera();
     test_depth_images();
     test_smoothing();

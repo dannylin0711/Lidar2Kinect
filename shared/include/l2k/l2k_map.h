@@ -77,6 +77,13 @@ typedef struct l2k_map_params {
     float area_near, area_far; /* horizontal distance from the sensor, metres */
     float area_half_width;     /* sideways from the sensor's axis, metres */
     float area_hip_min, area_hip_max; /* hip height above the floor the game is told about, metres */
+    /* Placing the players on the game's own standing points (see "Normalising" below). Replaces the fit when on. */
+    uint8_t normalize;         /* nonzero: on */
+    uint8_t norm_players;      /* 1 or 2: how many players the game is told about */
+    float norm_distance;       /* metres in front of the sensor: 2.5 */
+    float norm_spacing;        /* two players: each this far either side of the middle: 0.61 */
+    float norm_follow_seconds; /* how quickly the standing point follows the player; 0 = the hips are pinned */
+    float norm_reach;          /* how far from the standing point a player may be reported at most, metres */
 } l2k_map_params;
 
 /* The play area. Dance Evolution only takes a body as a player while its position lies in a box in
@@ -112,6 +119,18 @@ typedef struct l2k_map_params {
 
 void l2k_map_params_default(l2k_map_params *params);
 
+/* Normalising. Dance Evolution places its world 2.5 m in front of the sensor (docs/01 section 7): that is the
+ * middle of the box a player must stand in, and where its dancer stands. Its two-player rule expects the players
+ * 0.61 m either side of the middle. With `normalize` the mapper reports, whatever the room looks like:
+ *  - a level sensor: every joint is turned about the sensor so that "up" is the y axis (the game no longer has to
+ *    undo the tilt from the elevation angle), and the floor plane is (0, 1, 0, sensor height);
+ *  - each player on a standing point: one player at (0, 2.5 m); two players at -0.61 m and +0.61 m, each on the
+ *    side they really stand on. The standing point follows the player's own position slowly
+ *    (`norm_follow_seconds`), so steps and leans are reported as they are and only the place in the room is removed;
+ *    a player is never reported more than `norm_reach` from the standing point, i.e. always inside the play area;
+ *  - only `norm_players` players: those who were there first. Other bodies are not sent.
+ * The depth and colour images are not changed. `picture` keeps every skeleton as it was before this (and before the
+ * fit), for drawing over the camera picture. */
 typedef struct l2k_mapper {
     l2k_map_params params;
     uint32_t frame_number;
@@ -124,9 +143,16 @@ typedef struct l2k_mapper {
     float sensor_height;                  /* metres above the floor */
     int floor_valid;
     int floor_fixed;
-    /* per slot: what the play-area fit added to the body in the frame last mapped ((0,0,0) = untouched). A local
-     * preview subtracts it to draw the skeleton over the camera picture, where the player really is. */
-    l2k_vec3 fit_shift[L2K_SKELETON_SLOTS];
+    /* per slot: the skeleton of the frame last mapped before the play-area fit / normalising moved it: where the
+     * body is in the camera picture. A local preview draws these over the picture. */
+    l2k_skeleton picture[L2K_SKELETON_SLOTS];
+    /* normalising: per slot the standing point's place in the room (level frame), and the side given to it */
+    struct {
+        float x, z;
+        uint8_t valid;
+        int8_t side; /* two players: -1 / +1, 0 = not decided */
+    } anchor[L2K_SKELETON_SLOTS];
+    uint64_t norm_last_us;
     /* per slot: each joint's last known offset from its parent joint, used while the source loses it */
     struct {
         l2k_vec3 offset[L2K_JOINT_COUNT];

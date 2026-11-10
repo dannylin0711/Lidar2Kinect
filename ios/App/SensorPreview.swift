@@ -8,9 +8,9 @@ struct SensorPreview: View {
     let skeleton: l2k_skeleton_frame?
     /// The picture shows this many times the Kinect's field of view; the Kinect's own image is the framed middle.
     var zoom: CGFloat = 1
-    /// Per slot: what the play-area fit added to the body. The overlay on the picture takes it off again (the picture
-    /// shows where the player really is); the top view keeps it (it shows what the game is told).
-    var fitShift: [SIMD3<Float>] = []
+    /// The skeletons as the camera sees them. The overlay on the picture draws these (the picture shows where the
+    /// player really is); the top view draws `skeleton` (what the game is told).
+    var pictureSkeleton: l2k_skeleton_frame?
 
     private static let slotColors: [Color] = [.green, .cyan, .yellow, .pink, .purple, .mint]
 
@@ -64,14 +64,12 @@ struct SensorPreview: View {
             }
             guard let skeleton else { return }
             drawTopView(skeleton, in: &context, size: size)
-            for (slot, body) in skeleton.trackedSkeletons {
+            for (slot, body) in (pictureSkeleton ?? skeleton).trackedSkeletons {
                 let color = Self.slotColors[slot % Self.slotColors.count]
                 let positions = body.jointPositions
                 let states = body.jointStates
                 // skeleton space -> depth image pixel -> view point (the same projection the receiver side uses)
-                let shift = slot < fitShift.count ? fitShift[slot] : .zero
-                let points: [CGPoint?] = positions.map { reported in
-                    let p = l2k_vec3(x: reported.x - shift.x, y: reported.y - shift.y, z: reported.z - shift.z)
+                let points: [CGPoint?] = positions.map { p in
                     var u: Float = 0, v: Float = 0
                     guard l2k_skeleton_to_depth_pixel(p, 320, 240, &u, &v) == 1 else { return nil }
                     // a zoomed-out picture shrinks everything towards the centre

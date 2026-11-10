@@ -28,7 +28,7 @@ struct ContentView: View {
 
     private var previewColumn: some View {
         VStack(spacing: 8) {
-            SensorPreview(image: model.preview, skeleton: model.skeleton, zoom: model.shownZoom, fitShift: model.fitShift)
+            SensorPreview(image: model.preview, skeleton: model.skeleton, zoom: model.shownZoom, pictureSkeleton: model.pictureSkeleton)
             Text(model.previewMode == .depth
                  ? "Depth: bright = near, blue = outside the Kinect's 0.8–4 m, green = person, black = no reading. Skeleton: orange = your left, blue = your right."
                  : "Skeleton: orange = your left side, blue = your right side."
@@ -125,7 +125,21 @@ struct ContentView: View {
                 Text("For a camera that sees you from the waist up. Your arms and head are tracked; the legs are filled in standing still, so foot and step notes will miss.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            Toggle("Fit me into the game's play area", isOn: $model.fitPlayArea)
+            Toggle("Best position for Dance Evolution", isOn: $model.normalize)
+            if model.normalize {
+                Picker("Players in the game", selection: $model.normalizePlayers) {
+                    Text("1 player").tag(1)
+                    Text("2 players").tag(2)
+                }
+                .pickerStyle(.segmented)
+            }
+            Text(model.normalize
+                 ? (model.normalizePlayers == 2
+                    ? "The game is told two players stand 0.61 m either side of the middle of its play area, 2.5 m from a level sensor, each on the side they really stand on. Steps and leans are sent as they are; where you stand in the room is not."
+                    : "The game is told you stand in the middle of its play area, 2.5 m from a level sensor, wherever you really are and however the device is tilted. Steps and leans are sent as they are; where you stand in the room is not. Other people in view are not sent.")
+                 : "Off: you are reported where you really stand, as seen from this device.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Toggle("Fit me into the game's play area", isOn: $model.fitPlayArea).disabled(model.normalize)
             Text(model.fitPlayArea
                  ? "If you stand nearer than 1.8 m, farther than 3.2 m or more than 1.25 m to one side, the game is told you are just inside those limits. Your pose is not changed."
                  : "You are reported where you really stand. The game ignores a player outside 1.8–3.2 m from the sensor or more than 1.25 m to one side.")
@@ -149,7 +163,10 @@ struct ContentView: View {
                 if let body = skeleton.trackedSkeletons.first?.skeleton {
                     let real = model.realDistance ?? body.position.z
                     Row("Distance", String(format: "%.2f m", real))
-                    if real < L2KPipeline.playAreaNear || real > L2KPipeline.playAreaFar {
+                    if model.normalize {
+                        Text(String(format: "Reported to the game at %.2f m.", body.position.z))
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else if real < L2KPipeline.playAreaNear || real > L2KPipeline.playAreaFar {
                         Text(model.fitPlayArea
                              ? String(format: "The game only takes a player 1.8–3.2 m away. You are reported to it at %.2f m.", body.position.z)
                              : "The game only takes a player 1.8–3.2 m away: it will not pick you up here.")

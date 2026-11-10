@@ -131,6 +131,26 @@ slides a tracked body that is outside the box horizontally to 10 cm inside its e
 1.6 m above it) when there is no measured floor. A body already inside is not touched. The depth
 and colour images are not changed, so in this case they no longer line up with the skeleton.
 
+**Normalising for Dance Evolution.** The game places its world 2.5 m in front of the sensor: the
+middle of the play-area box, and where its dancer stands; its two-player rule expects the players
+0.61 m either side of that (`docs/01` §7). With `normalize` (the app's "Best position for Dance
+Evolution", off by default) the mapper reports, whatever the room looks like:
+
+- a level sensor: every joint is turned about the sensor so that up is the y axis, `up` is sent as
+  (0, 1, 0) (elevation 0) and the floor plane as (0, 1, 0, sensor height). Heights above the floor
+  are unchanged;
+- each player on a standing point: one player at x = 0, z = 2.5 m; two players at x = −0.61 m and
+  +0.61 m, each on the side they really stand on. The standing point follows the player's own
+  position with a time constant of 2 s (`norm_follow_seconds`; 0 pins the hips), so a step or a
+  lean is sent as it is and only the place in the room is removed. A player is never reported more
+  than 0.5 m (`norm_reach`) from the standing point, hence never outside the play area;
+- only `norm_players` (1 or 2) players, those whose identity is the oldest. Other bodies are not
+  sent as skeletons (they are still in the depth image's player index).
+
+It replaces the fit when on. `l2k_mapper.picture` keeps every skeleton as it was before the fit or
+the normalising, for drawing over the camera picture. Not yet tried in the game: whether any judge
+depends on where the player stands rather than on the pose is not read from the DLL.
+
 Quality bits: a joint beyond 97 % of the half field of view sets the matching clipped-edge bit.
 Which side the SDK calls "left" and "right" is taken to be the image's left and right — not yet
 checked against a real sensor.
