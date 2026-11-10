@@ -48,6 +48,8 @@ final class SensorModel: ObservableObject {
     }
     /// Where the player really stands (metres from the sensor), before the play-area fit.
     @Published var realDistance: Float?
+    /// Per slot: how far the play-area fit moved the body the game is told about (zero when untouched).
+    @Published var fitShift: [SIMD3<Float>] = []
     @Published var keepPlayer: Bool {
         didSet {
             UserDefaults.standard.set(keepPlayer, forKey: "l2kKeepPlayer")
@@ -121,9 +123,10 @@ final class SensorModel: ObservableObject {
         }
         discovery.onChange = { [weak self] receivers in self?.receivers = receivers }
         discovery.start()
-        previewer.onPreview = { [weak self] image, zoom, skeleton, rate, status, diagnostics, distance in
+        previewer.onPreview = { [weak self] image, zoom, skeleton, rate, status, diagnostics, distance, shift in
             guard let self else { return }
             self.realDistance = distance
+            self.fitShift = shift
             self.preview = image
             self.shownZoom = zoom
             self.skeleton = skeleton
@@ -238,7 +241,7 @@ final class SensorModel: ObservableObject {
 /// Turns frames into preview images on the capture queue, at most 15 times per second.
 final class Previewer {
     /// Called on the main queue.
-    var onPreview: ((CGImage?, CGFloat, l2k_skeleton_frame, Double, String, [String], Float?) -> Void)?
+    var onPreview: ((CGImage?, CGFloat, l2k_skeleton_frame, Double, String, [String], Float?, [SIMD3<Float>]) -> Void)?
     var context: CIContext?
     weak var source: L2KSource?
 
@@ -301,7 +304,8 @@ final class Previewer {
             let skeleton = frame.skeleton
             if let image { self?.snapshotIfAsked(image, zoom: zoom, skeleton: skeleton) }
             let distance = frame.realDistance
-            DispatchQueue.main.async { self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics, distance) }
+            let shift = frame.fitShift
+            DispatchQueue.main.async { self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics, distance, shift) }
             guard let self else { return }
             self.lock.lock()
             self.building = false

@@ -124,6 +124,9 @@ typedef struct l2k_mapper {
     float sensor_height;                  /* metres above the floor */
     int floor_valid;
     int floor_fixed;
+    /* per slot: what the play-area fit added to the body in the frame last mapped ((0,0,0) = untouched). A local
+     * preview subtracts it to draw the skeleton over the camera picture, where the player really is. */
+    l2k_vec3 fit_shift[L2K_SKELETON_SLOTS];
     /* per slot: each joint's last known offset from its parent joint, used while the source loses it */
     struct {
         l2k_vec3 offset[L2K_JOINT_COUNT];

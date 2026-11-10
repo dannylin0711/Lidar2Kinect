@@ -26,6 +26,15 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-10 (late night, 6) — preview overlay follows the real player again (Apple side)
+
+- 0.7.0 drew the skeleton over the camera picture from the skeleton the game is told about. With the
+  play-area fit moving a player who stands outside the box, the 2D points sat off the person.
+- `shared/`: `l2k_mapper.fit_shift[slot]` = what the fit added to each body in the last frame (state
+  only; no packet or convention change). The app's overlay subtracts it; the top-down inset keeps
+  showing the reported position. 1037 checks. Not checked with a person in view.
+- App 0.7.1.
+
 ## 2026-11-10 (late night, 5) — why a player cannot come back; play-area fit; ultra-wide depths (Apple side)
 
 - Danny, playing the real game with the app: (1) the left hand is wrong in the game though right

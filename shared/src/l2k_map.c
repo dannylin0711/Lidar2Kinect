@@ -392,6 +392,9 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
     }
 
     /* 4b. play area: a tracked body outside it slides horizontally to just inside */
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+        if (out->skeletons[s].state == L2K_SKELETON_TRACKED) memset(&m->fit_shift[s], 0, sizeof m->fit_shift[s]);
+    }
     if (m->params.fit_play_area) {
         l2k_vec3 z_axis = {0, 0, 1}, x_default = {1, 0, 0};
         l2k_vec3 forward = v_unit(v_sub(z_axis, v_scale(up, v_dot(z_axis, up))), z_axis); /* level, away from the sensor */
@@ -410,6 +413,7 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
             sk->position = v_add(sk->position, shift);
             for (j = 0; j < L2K_JOINT_COUNT; j++) sk->joints[j] = v_add(sk->joints[j], shift);
             m->last[s] = *sk; /* a held skeleton is held where the game saw it */
+            m->fit_shift[s] = shift;
         }
     }
 

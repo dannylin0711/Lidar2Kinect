@@ -24,6 +24,9 @@ public struct L2KFrame {
     public var colorPreviewZoom: Float = 1
     /// Where the first body really stands: its level distance from the sensor in metres, before any play-area fit.
     public var realDistance: Float?
+    /// Per skeleton slot: what the play-area fit added to the body (zero when untouched). Subtract it to draw the
+    /// skeleton over the camera picture, where the player really is.
+    public var fitShift: [SIMD3<Float>] = []
 }
 
 /// The raw depth map resampled to the virtual Kinect image (320x240).
@@ -94,6 +97,7 @@ public final class L2KPipeline {
         }
         var frame = L2KFrame(skeleton: skeleton, depth: nil, color: nil, quadrant: q)
         frame.realDistance = Self.realDistance(of: source.bodies.first, quadrant: q, up: skeleton.up)
+        frame.fitShift = withUnsafeBytes(of: mapper.fit_shift) { $0.bindMemory(to: l2k_vec3.self).map { SIMD3($0.x, $0.y, $0.z) } }
         if wantDepth {
             frame.depth = depthImage(source, skeleton: &skeleton, quadrant: q, playersOnly: playersOnly)
         }

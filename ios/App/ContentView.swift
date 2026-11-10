@@ -28,7 +28,7 @@ struct ContentView: View {
 
     private var previewColumn: some View {
         VStack(spacing: 8) {
-            SensorPreview(image: model.preview, skeleton: model.skeleton, zoom: model.shownZoom)
+            SensorPreview(image: model.preview, skeleton: model.skeleton, zoom: model.shownZoom, fitShift: model.fitShift)
             Text(model.previewMode == .depth
                  ? "Depth: bright = near, blue = outside the Kinect's 0.8–4 m, green = person, black = no reading. Skeleton: orange = your left, blue = your right."
                  : "Skeleton: orange = your left side, blue = your right side."

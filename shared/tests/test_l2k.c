@@ -591,6 +591,12 @@ static void test_play_area(void) {
     CHECK(nearly(f.skeletons[0].position.z, 1.90f, 1e-5f));
     CHECK(nearly(f.skeletons[0].position.x, -1.15f, 1e-5f));
     CHECK(nearly(f.skeletons[0].position.y, ref.skeletons[0].position.y, 1e-6f)); /* never moved vertically */
+    /* the mapper says how far it moved the body, so a preview can draw it where it really is */
+    CHECK(nearly(f.skeletons[0].position.x - m.fit_shift[0].x, ref.skeletons[0].position.x, 1e-5f));
+    CHECK(nearly(f.skeletons[0].position.z - m.fit_shift[0].z, ref.skeletons[0].position.z, 1e-5f));
+    CHECK(m.fit_shift[0].y == 0.0f && m.fit_shift[1].x == 0.0f && m.fit_shift[1].z == 0.0f);
+    l2k_mapper_map(&m, &body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f); /* back inside: no shift left over */
+    CHECK(m.fit_shift[0].x == 0.0f && m.fit_shift[0].z == 0.0f);
     for (j = 0; j < L2K_JOINT_COUNT; j++) {
         CHECK(nearly(f.skeletons[0].joints[j].x - f.skeletons[0].position.x, ref.skeletons[0].joints[j].x - ref.skeletons[0].position.x, 1e-5f));
         CHECK(nearly(f.skeletons[0].joints[j].y, ref.skeletons[0].joints[j].y, 1e-6f));
