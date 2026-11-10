@@ -79,7 +79,7 @@ enum {
     L2K_SOURCE_SYNTHETIC = 0,   /* generated test motion */
     L2K_SOURCE_ARKIT_BODY = 1,  /* ARKit ARBodyAnchor (rear camera, one body) */
     L2K_SOURCE_VISION_3D = 2,   /* Vision 3D body pose */
-    L2K_SOURCE_VISION_DEPTH = 3,/* Vision 2D pose lifted with LiDAR depth */
+    L2K_SOURCE_VISION_DEPTH = 3,/* 2D body pose lifted with the LiDAR depth map */
     L2K_SOURCE_REPLAY = 4       /* recorded stream */
 };
 

@@ -77,6 +77,81 @@ final class L2KKitTests: XCTestCase {
         XCTAssertLessThan(jpeg.count, 200_000)
     }
 
+    /// 2D joints + a depth map give back the 3D joints they came from, in the camera space the C mapper expects.
+    func testDepthLiftRecoversTheBody() throws {
+        // a camera like the phone's wide camera, principal point slightly off-centre
+        let camera = l2k_src_camera(fxn: 0.78, fyn: 1.04, cxn: 0.51, cyn: 0.49)
+        var truth = l2k_src_body()
+        l2k_synth_body(0.4, 0, 1, &truth)
+        let positions = withUnsafeBytes(of: truth.p) { Array($0.bindMemory(to: l2k_vec3.self)) }
+        let radius: Float = 0.05
+        let sources = [L2K_SRC_PELVIS, L2K_SRC_NECK, L2K_SRC_HEAD, L2K_SRC_SHOULDER_LEFT, L2K_SRC_ELBOW_LEFT, L2K_SRC_WRIST_LEFT,
+                       L2K_SRC_SHOULDER_RIGHT, L2K_SRC_ELBOW_RIGHT, L2K_SRC_WRIST_RIGHT, L2K_SRC_HIP_LEFT, L2K_SRC_KNEE_LEFT,
+                       L2K_SRC_ANKLE_LEFT, L2K_SRC_HIP_RIGHT, L2K_SRC_KNEE_RIGHT, L2K_SRC_ANKLE_RIGHT].map { Int($0) }
+
+        // Scene: a wall 5 m away; around each joint a patch of body surface `radius` in front of the joint, on the mask.
+        let w = 256, h = 192
+        var depth = [Float](repeating: 5.0, count: w * h)
+        var mask = [UInt8](repeating: 0, count: w * h)
+        var joints: [DepthLiftJoint] = []
+        for source in sources {
+            let p = positions[source]
+            let forward = -p.z
+            let u = camera.cxn + camera.fxn * p.x / forward, v = camera.cyn - camera.fyn * p.y / forward
+            joints.append(DepthLiftJoint(source: source, u: u, v: v, radius: radius))
+            let cx = Int(u * Float(w)), cy = Int(v * Float(h))
+            for y in max(0, cy - 3)...min(h - 1, cy + 3) {
+                for x in max(0, cx - 3)...min(w - 1, cx + 3) {
+                    depth[y * w + x] = forward - radius
+                    mask[y * w + x] = 255
+                }
+            }
+        }
+        // one more joint that falls on the wall: the right toe, off the body
+        joints.append(DepthLiftJoint(source: Int(L2K_SRC_TOE_RIGHT), u: 0.05, v: 0.05, radius: radius))
+
+        var body = l2k_src_body()
+        let placed = depth.withUnsafeBytes { d in
+            mask.withUnsafeBytes { m in
+                DepthLift.lift(joints, buffers: DepthLiftBuffers(depth: d.baseAddress!, depthWidth: w, depthHeight: h, depthStride: w * 4,
+                                                                 mask: m.baseAddress!, maskWidth: w, maskHeight: h, maskStride: w),
+                               camera: camera, into: &body)
+            }
+        }
+        XCTAssertEqual(placed, sources.count + 1)
+        let lifted = withUnsafeBytes(of: body.p) { Array($0.bindMemory(to: l2k_vec3.self)) }
+        let confidence = withUnsafeBytes(of: body.conf) { Array($0) }
+        for source in sources {
+            XCTAssertEqual(confidence[source], 2)
+            XCTAssertEqual(lifted[source].x, positions[source].x, accuracy: 0.002)
+            XCTAssertEqual(lifted[source].y, positions[source].y, accuracy: 0.002)
+            XCTAssertEqual(lifted[source].z, positions[source].z, accuracy: 0.002)
+        }
+        // the joint on the wall is pulled to the body's depth and reported as estimated
+        let toe = Int(L2K_SRC_TOE_RIGHT)
+        XCTAssertEqual(confidence[toe], 1)
+        XCTAssertEqual(lifted[toe].z, positions[Int(L2K_SRC_PELVIS)].z, accuracy: 0.25)
+
+        // and the lifted body maps to the same Kinect skeleton as the original
+        var mapperA = l2k_mapper(), mapperB = l2k_mapper()
+        l2k_mapper_init(&mapperA, nil)
+        l2k_mapper_init(&mapperB, nil)
+        var frameA = l2k_skeleton_frame(), frameB = l2k_skeleton_frame()
+        let up = l2k_vec3(x: 0, y: 1, z: 0)
+        truth.tracking_id = 1
+        body.tracking_id = 1
+        l2k_mapper_map(&mapperA, &truth, 1, up, 0, 0, 0, &frameA)
+        l2k_mapper_map(&mapperB, &body, 1, up, 0, 0, 0, &frameB)
+        let a = frameA.slots[0], b = frameB.slots[0]
+        XCTAssertTrue(a.isTracked && b.isTracked)
+        for joint in [KinectJoint.head, .shoulderLeft, .wristRight, .kneeLeft, .ankleRight] {
+            XCTAssertEqual(a.position(of: joint).x, b.position(of: joint).x, accuracy: 0.003)
+            XCTAssertEqual(a.position(of: joint).y, b.position(of: joint).y, accuracy: 0.003)
+            XCTAssertEqual(a.position(of: joint).z, b.position(of: joint).z, accuracy: 0.003)
+        }
+        XCTAssertFalse(b.jointStates.contains(UInt8(L2K_JOINT_NOT_TRACKED)))
+    }
+
     /// The sender against a minimal receiver on localhost: HELLO -> CONFIG -> the requested streams arrive and decode.
     func testSenderHandshakeAndStreams() throws {
         let listener = try NWListener(using: .udp, on: .any)

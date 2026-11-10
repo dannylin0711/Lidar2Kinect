@@ -79,7 +79,12 @@ static const struct {
 };
 
 /* Fill one skeleton from one source body. Returns the resulting slot state. */
-static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int quadrant, l2k_vec3 up, l2k_skeleton *s) {
+typedef struct {
+    l2k_vec3 offset[L2K_JOINT_COUNT];
+    uint8_t valid[L2K_JOINT_COUNT];
+} joint_memory;
+
+static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int quadrant, l2k_vec3 up, l2k_skeleton *s, joint_memory *mem) {
     l2k_vec3 k[L2K_SRC_JOINT_COUNT];
     uint8_t conf[L2K_SRC_JOINT_COUNT];
     l2k_vec3 pelvis, neck, torso, sum = {0, 0, 0};
@@ -156,9 +161,17 @@ static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int qu
         }
     }
 
-    /* a joint the source did not give sits on its parent, flagged not tracked */
+    /* A joint the source did not give is inferred: it keeps its last known offset from its parent
+     * joint (it sits on the parent if it was never seen). Parents come before children in joint order. */
     for (i = 1; i < L2K_JOINT_COUNT; i++) {
-        if (s->joint_state[i] == L2K_JOINT_NOT_TRACKED) s->joints[i] = s->joints[PARENT[i]];
+        if (s->joint_state[i] == L2K_JOINT_NOT_TRACKED) {
+            s->joints[i] = s->joints[PARENT[i]];
+            if (mem->valid[i]) s->joints[i] = v_add(s->joints[i], mem->offset[i]);
+            s->joint_state[i] = L2K_JOINT_INFERRED;
+        } else {
+            mem->offset[i] = v_sub(s->joints[i], s->joints[PARENT[i]]);
+            mem->valid[i] = 1;
+        }
     }
 
     /* which image edges cut the body */
@@ -232,6 +245,7 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
             if (!m->slot_id[s]) {
                 m->slot_id[s] = ids[i];
                 slot_of[i] = s;
+                memset(&m->memory[s], 0, sizeof m->memory[s]); /* a new body: forget the last one's pose */
                 break;
             }
         }
@@ -242,7 +256,7 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
         float h;
         if (slot_of[i] < 0) continue;
         sk = &out->skeletons[slot_of[i]];
-        sk->state = map_body(&m->params, &bodies[i], quadrant, up, sk);
+        sk->state = map_body(&m->params, &bodies[i], quadrant, up, sk, (joint_memory *)(void *)&m->memory[slot_of[i]]);
         if (sk->state == L2K_SKELETON_NOT_TRACKED) {
             m->slot_id[slot_of[i]] = 0;
             continue;

@@ -40,6 +40,23 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             sensorCard
             receiverCard
+            if !model.deviceSupport.isEmpty { supportCard }
+        }
+    }
+
+    // MARK: - device support
+
+    /// What ARKit reports it can do on this device: explains which sources and streams are available.
+    private var supportCard: some View {
+        Card(title: "This device") {
+            ForEach(model.deviceSupport, id: \.label) { item in
+                HStack(alignment: .firstTextBaseline) {
+                    Image(systemName: item.supported ? "checkmark.circle.fill" : "xmark.circle")
+                        .foregroundStyle(item.supported ? .green : .secondary)
+                    Text(item.label).font(.footnote)
+                    Spacer()
+                }
+            }
         }
     }
 
@@ -49,7 +66,7 @@ struct ContentView: View {
         Card(title: "Sensor") {
             if model.cameraAvailable {
                 Picker("Source", selection: Binding(get: { model.sourceChoice }, set: { model.selectSource($0) })) {
-                    ForEach(SensorModel.SourceChoice.allCases) { Text($0.title).tag($0) }
+                    ForEach(model.availableSources) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
             } else {

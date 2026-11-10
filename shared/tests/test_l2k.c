@@ -386,6 +386,34 @@ static void test_mapping(void) {
     body[0].conf[L2K_SRC_NECK] = 0;
     l2k_mapper_map(&m, body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
     CHECK(f.skeletons[0].state == L2K_SKELETON_POSITION_ONLY && f.skeletons[0].position.z > 2.0f);
+
+    /* a joint the source loses is inferred, never "not tracked": never seen = on its parent,
+     * seen before = at its last offset from the parent, which follows the parent */
+    l2k_synth_body(0.3, 0, 1, &body[0]);
+    body[0].conf[L2K_SRC_ELBOW_LEFT] = 0;
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_map(&m, body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    s = &f.skeletons[0];
+    CHECK(s->state == L2K_SKELETON_TRACKED && s->joint_state[L2K_JOINT_ELBOW_LEFT] == L2K_JOINT_INFERRED);
+    CHECK(nearly(s->joints[L2K_JOINT_ELBOW_LEFT].x, s->joints[L2K_JOINT_SHOULDER_LEFT].x, 1e-6f));
+    CHECK(nearly(s->joints[L2K_JOINT_ELBOW_LEFT].y, s->joints[L2K_JOINT_SHOULDER_LEFT].y, 1e-6f));
+    for (i = 0; i < L2K_JOINT_COUNT; i++) CHECK(s->joint_state[i] != L2K_JOINT_NOT_TRACKED);
+    {
+        l2k_vec3 seen, shoulder;
+        l2k_synth_body(0.3, 0, 1, &body[0]);
+        l2k_mapper_init(&m, NULL);
+        l2k_mapper_map(&m, body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+        seen = f.skeletons[0].joints[L2K_JOINT_ELBOW_LEFT];
+        shoulder = f.skeletons[0].joints[L2K_JOINT_SHOULDER_LEFT];
+        for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) body[0].p[i].x += 0.5f; /* the whole body moves sideways */
+        body[0].conf[L2K_SRC_ELBOW_LEFT] = 0;
+        l2k_mapper_map(&m, body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+        s = &f.skeletons[0];
+        CHECK(s->joint_state[L2K_JOINT_ELBOW_LEFT] == L2K_JOINT_INFERRED);
+        CHECK(nearly(s->joints[L2K_JOINT_ELBOW_LEFT].x - s->joints[L2K_JOINT_SHOULDER_LEFT].x, seen.x - shoulder.x, 1e-5f));
+        CHECK(nearly(s->joints[L2K_JOINT_ELBOW_LEFT].y - s->joints[L2K_JOINT_SHOULDER_LEFT].y, seen.y - shoulder.y, 1e-5f));
+        CHECK(nearly(s->joints[L2K_JOINT_ELBOW_LEFT].x, seen.x - 0.5f, 1e-5f)); /* camera +x is Kinect -x */
+    }
 }
 
 static void test_virtual_camera(void) {

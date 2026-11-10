@@ -45,6 +45,9 @@ typedef struct l2k_src_body {
     uint32_t tracking_id;                   /* stable per person; 0 = let the mapper number it */
     l2k_vec3 p[L2K_SRC_JOINT_COUNT];
     uint8_t conf[L2K_SRC_JOINT_COUNT];      /* 0 = missing, 1 = low confidence / estimated, 2 = tracked */
+    /* A missing joint of a tracked body is reported INFERRED, at its last known offset from its
+     * parent joint (on the parent if it was never seen): a tracked skeleton never carries a
+     * NOT_TRACKED joint. Dance Evolution drops a player whose 20 joint states are not all nonzero. */
 } l2k_src_body;
 
 /* Tunables for the joints Kinect places differently from the anatomical source joints.
@@ -70,6 +73,11 @@ typedef struct l2k_mapper {
     float sensor_height;                  /* metres above the floor */
     int floor_valid;
     int floor_fixed;
+    /* per slot: each joint's last known offset from its parent joint, used while the source loses it */
+    struct {
+        l2k_vec3 offset[L2K_JOINT_COUNT];
+        uint8_t valid[L2K_JOINT_COUNT];
+    } memory[L2K_SKELETON_SLOTS];
 } l2k_mapper;
 
 /* params may be NULL for the defaults. */

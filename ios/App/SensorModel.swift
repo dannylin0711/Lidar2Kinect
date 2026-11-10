@@ -7,9 +7,15 @@ import SwiftUI
 @MainActor
 final class SensorModel: ObservableObject {
     enum SourceChoice: String, CaseIterable, Identifiable {
-        case arkit, synthetic
+        case lidar, arkit, synthetic
         var id: String { rawValue }
-        var title: String { self == .arkit ? "Camera + LiDAR" : "Test figure" }
+        var title: String {
+            switch self {
+            case .lidar: return "LiDAR depth"
+            case .arkit: return "Body tracking"
+            case .synthetic: return "Test figure"
+            }
+        }
     }
 
     enum PreviewMode: String, CaseIterable, Identifiable {
@@ -30,8 +36,11 @@ final class SensorModel: ObservableObject {
     @Published var host: String { didSet { UserDefaults.standard.set(host, forKey: "l2kHost") } }
     @Published var port: String { didSet { UserDefaults.standard.set(port, forKey: "l2kPort") } }
 
-    /// True when this device can run the camera source at all (false in the simulator).
-    let cameraAvailable: Bool
+    /// The sources this device can run (the test figure always; the camera sources never in the simulator).
+    let availableSources: [SourceChoice]
+    /// What ARKit supports on this device, for the diagnostics card.
+    let deviceSupport: [(label: String, supported: Bool)]
+    var cameraAvailable: Bool { availableSources.count > 1 }
     private let session = L2KSession()
     private let discovery = L2KDiscovery()
     private let previewer = Previewer()
@@ -40,14 +49,20 @@ final class SensorModel: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
+        var sources: [SourceChoice] = []
         #if targetEnvironment(simulator)
-        cameraAvailable = false
+        deviceSupport = []
         #else
-        cameraAvailable = ARKitBodySource.isSupported
+        if ARKitDepthSource.isSupported { sources.append(.lidar) }
+        if ARKitBodySource.isSupported { sources.append(.arkit) }
+        deviceSupport = L2KDeviceSupport.report()
         #endif
-        // Launch arguments (also plain defaults): -l2kSource synthetic|arkit, -l2kHost, -l2kPort, -l2kPlayers, -l2kAutoConnect 1
-        let wanted = SourceChoice(rawValue: defaults.string(forKey: "l2kSource") ?? "") ?? .arkit
-        sourceChoice = cameraAvailable ? wanted : .synthetic
+        sources.append(.synthetic)
+        availableSources = sources
+        // Launch arguments (also plain defaults): -l2kSource lidar|arkit|synthetic, -l2kHost, -l2kPort, -l2kPlayers, -l2kAutoConnect 1
+        // Default: the first camera source the device supports (LiDAR depth before 3D body tracking).
+        let wanted = SourceChoice(rawValue: defaults.string(forKey: "l2kSource") ?? "")
+        sourceChoice = wanted.flatMap { sources.contains($0) ? $0 : nil } ?? sources[0]
         host = defaults.string(forKey: "l2kHost") ?? ""
         port = defaults.string(forKey: "l2kPort") ?? String(L2K.defaultPort)
         players = max(1, defaults.integer(forKey: "l2kPlayers"))
@@ -86,7 +101,11 @@ final class SensorModel: ObservableObject {
         #if targetEnvironment(simulator)
         source = SyntheticSource(players: players)
         #else
-        source = sourceChoice == .arkit ? ARKitBodySource() : SyntheticSource(players: players)
+        switch sourceChoice {
+        case .lidar: source = ARKitDepthSource()
+        case .arkit: source = ARKitBodySource()
+        case .synthetic: source = SyntheticSource(players: players)
+        }
         #endif
         previewer.source = source
         previewer.context = session.pipeline.ciContext

@@ -26,6 +26,21 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-10 (later) — first device run, LiDAR depth source (Apple side)
+
+- Danny installed 0.1.0 on a device: the body-tracking source reported no depth. ARKit's
+  documentation gives `sceneDepth` to the world-tracking configuration only.
+- New source `ARKitDepthSource` (app: "LiDAR depth", the default where supported): world tracking
+  with scene depth, person segmentation and 2D body detection; joints lifted with the depth map
+  (`DepthLift`, `docs/03` §7). The lifting maths is tested on the Mac
+  (`testDepthLiftRecoversTheBody`); **the source itself has not run on a device.**
+- App 0.2.0: three-way source picker, a "This device" card listing what ARKit supports.
+- **`shared/` behaviour change (mapper):** a joint the source does not give is now reported
+  INFERRED at its last known offset from its parent, never NOT_TRACKED — Dance Evolution drops a
+  player unless all 20 joint states are nonzero. `l2k_mapper` grew a `memory` field; the wire
+  format and the golden packets are unchanged. `make -C shared test`: 809 checks. Windows side:
+  rebuild against the new `shared/`; no code change expected.
+
 ## 2026-11-10 — project start (Apple side)
 
 Done and verified on the Mac:

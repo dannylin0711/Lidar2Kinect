@@ -81,9 +81,12 @@ The mapper produces the 20 Kinect joints:
 | hand | the source's palm joint, else wrist + `hand_extension` × (wrist − elbow), marked inferred |
 | foot | the source's toe joint, else a point `foot_length` in front of the ankle, marked inferred |
 
-Joint state: source confidence 2 → tracked, 1 → inferred, 0 → not tracked (the joint then sits
-on its parent joint). A body with a pelvis (or both hips) and a neck is *tracked*; with less it
-is *position only*.
+Joint state: source confidence 2 → tracked, 1 → inferred. A joint the source does not give (0)
+is reported **inferred**, at its last known offset from its parent joint, or on the parent if it
+was never seen. A tracked skeleton therefore never carries a "not tracked" joint. The reason is
+the game: Dance Evolution drops a player to the rest pose unless all 20 joint states are nonzero
+(read from the DLL in the port, `docs/16` there). A body with a pelvis (or both hips) and a neck
+is *tracked*; with less it is *position only*.
 
 Slots: a body keeps its slot (0…5) while its tracking id stays; a body that disappears frees its
 slot at once.
@@ -124,12 +127,24 @@ and fit the parameters. Until then the joints that depend on them are plausible 
 
 ## 7. Capture sources
 
-| Source | Camera | Bodies | Status |
-|---|---|---|---|
-| ARKit body tracking (`ARKitBodySource`) | rear, LiDAR improves scale | 1 | written, builds; **not yet run on a device** |
-| Synthetic figure (`SyntheticSource`, `l2k_synth_body`) | none | 1–2 | working; used by tests and the simulator (level camera 1.0 m up) and by `l2k_fake_sender` (`l2k_synth_body_at`: 2.0 m up, tilted −24°, like the cabinet's Kinect; `-H` / `-a` change it) |
-| Vision body pose + LiDAR depth | rear or front | several | planned: needed for two players and for the front camera |
+| Source | ARKit session | Bodies | Depth image | Status |
+|---|---|---|---|---|
+| LiDAR depth (`ARKitDepthSource`) | world tracking with `sceneDepth` + `personSegmentationWithDepth` + `bodyDetection` (as many as the device supports together) | 1 | the LiDAR depth map, players from the person mask | written 2026-11-10, lifting maths tested on the Mac; **not yet run on a device** |
+| Body tracking (`ARKitBodySource`) | body tracking (3D skeleton) | 1 | none from ARKit: drawn from the skeleton | run on Danny's device 2026-11-10: no depth reported |
+| Synthetic figure (`SyntheticSource`, `l2k_synth_body`) | none | 1–2 | drawn from the skeleton | working; used by tests, the simulator and `l2k_fake_sender` |
+| Vision body pose + LiDAR depth | world tracking | several | LiDAR depth map | planned: needed for two players and for the front camera |
 
-Whether ARKit delivers scene depth and person segmentation together with body tracking depends
-on the device and OS; the source asks ARKit at run time and the app shows what it got. Without
-them the depth image is drawn from the skeleton (a capsule figure per player).
+ARKit's documentation ties `sceneDepth` to the world-tracking configuration, and on the first
+device run the body-tracking source reported no depth. So the two ARKit sources split the job
+differently:
+
+- **LiDAR depth** takes ARKit's 2D body (13–15 joints in the camera image) and gives each joint the
+  depth the LiDAR measured at its pixel (`DepthLift`): the median over the person pixels of a 5×5
+  window, plus a per-joint surface-to-joint offset; a limb joint more than 1 m from the torso's
+  depth is held at the torso's depth and reported as estimated. The skeleton is metric and the
+  depth image is real. A joint hidden behind the body gets the depth of what hides it.
+- **Body tracking** uses ARKit's model-based 3D skeleton. It keeps a plausible pose for hidden
+  limbs, but there is no depth map, so the depth image is a capsule figure drawn from the skeleton.
+
+Which one tracks dancing better is not known yet; the app offers both and shows, under "This
+device", what ARKit says it supports.
