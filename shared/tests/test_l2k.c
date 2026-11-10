@@ -366,10 +366,70 @@ static void test_mapping(void) {
     CHECK(f.skeletons[0].position.x > f.skeletons[1].position.x); /* player 0 stands at image left = camera -x = Kinect +x */
     l2k_synth_body(0.1, 1, 2, &body[0]);
     l2k_synth_body(0.1, 0, 2, &body[1]);
-    l2k_mapper_map(&m, body, 2, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    l2k_mapper_map(&m, body, 2, up, 0, 33000, L2K_SOURCE_SYNTHETIC, &f);
     CHECK(f.skeletons[0].tracking_id == 1 && f.skeletons[1].tracking_id == 2);
-    l2k_mapper_map(&m, body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f); /* only id 2 remains */
-    CHECK(f.skeletons[0].state == L2K_SKELETON_NOT_TRACKED && f.skeletons[1].tracking_id == 2);
+
+    /* Dropouts. Only the second player remains: the first is held, frozen and inferred, for half a second... */
+    {
+        l2k_vec3 held = f.skeletons[0].joints[L2K_JOINT_HAND_LEFT];
+        l2k_mapper_map(&m, body, 1, up, 0, 66000, L2K_SOURCE_SYNTHETIC, &f);
+        CHECK(f.skeletons[1].state == L2K_SKELETON_TRACKED && f.skeletons[1].tracking_id == 2);
+        CHECK(f.skeletons[1].joint_state[L2K_JOINT_HEAD] == L2K_JOINT_TRACKED);
+        CHECK(f.skeletons[0].state == L2K_SKELETON_TRACKED && f.skeletons[0].tracking_id == 1);
+        CHECK(nearly(f.skeletons[0].joints[L2K_JOINT_HAND_LEFT].x, held.x, 0.0f));
+        for (i = 0; i < L2K_JOINT_COUNT; i++) CHECK(f.skeletons[0].joint_state[i] == L2K_JOINT_INFERRED);
+        l2k_mapper_map(&m, body, 1, up, 0, 500000, L2K_SOURCE_SYNTHETIC, &f);
+        CHECK(f.skeletons[0].state == L2K_SKELETON_TRACKED);
+        /* ...then the slot is empty */
+        l2k_mapper_map(&m, body, 1, up, 0, 600000, L2K_SOURCE_SYNTHETIC, &f);
+        CHECK(f.skeletons[0].state == L2K_SKELETON_NOT_TRACKED && f.skeletons[1].tracking_id == 2);
+    }
+    /* The first player comes back ten seconds later under a new source id: same slot, same tracking id */
+    l2k_synth_body(10.0, 0, 2, &body[1]);
+    body[1].tracking_id = 4711;
+    l2k_mapper_map(&m, body, 2, up, 0, 10000000, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(f.skeletons[0].state == L2K_SKELETON_TRACKED && f.skeletons[0].tracking_id == 1);
+    CHECK(f.skeletons[1].tracking_id == 2);
+    CHECK(f.skeletons[0].joint_state[L2K_JOINT_HEAD] == L2K_JOINT_TRACKED);
+    /* Both leave; they come back in the other order under new ids: each gets the identity nearest to where they stand */
+    l2k_mapper_map(&m, body, 0, up, 0, 12000000, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(f.skeletons[0].state == L2K_SKELETON_NOT_TRACKED && f.skeletons[1].state == L2K_SKELETON_NOT_TRACKED);
+    l2k_synth_body(13.0, 1, 2, &body[0]);
+    l2k_synth_body(13.0, 0, 2, &body[1]);
+    body[0].tracking_id = 9001;
+    body[1].tracking_id = 9002;
+    l2k_mapper_map(&m, body, 2, up, 0, 13000000, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(f.skeletons[0].tracking_id == 1 && f.skeletons[1].tracking_id == 2);
+    CHECK(f.skeletons[0].position.x > f.skeletons[1].position.x); /* player 0 is still the one at Kinect +x */
+    /* A one-frame miss never changes anything the game can see, whatever the source does with its ids */
+    l2k_mapper_map(&m, body, 0, up, 0, 13033000, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(f.skeletons[0].state == L2K_SKELETON_TRACKED && f.skeletons[0].tracking_id == 1);
+    body[0].tracking_id = 9003;
+    body[1].tracking_id = 9004;
+    l2k_mapper_map(&m, body, 2, up, 0, 13066000, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(f.skeletons[0].tracking_id == 1 && f.skeletons[1].tracking_id == 2);
+    CHECK(f.skeletons[0].joint_state[L2K_JOINT_HEAD] == L2K_JOINT_TRACKED);
+
+    /* With keep_identity off a returning player is a new one, as on a Kinect - but a short gap still is not */
+    {
+        l2k_map_params prm;
+        l2k_map_params_default(&prm);
+        prm.keep_identity = 0;
+        l2k_mapper_init(&m, &prm);
+        l2k_synth_body(0.0, 0, 1, &body[0]);
+        l2k_mapper_map(&m, body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+        CHECK(f.skeletons[0].tracking_id == 1);
+        l2k_mapper_map(&m, body, 0, up, 0, 100000, L2K_SOURCE_SYNTHETIC, &f);
+        CHECK(f.skeletons[0].state == L2K_SKELETON_TRACKED && f.skeletons[0].tracking_id == 1);
+        body[0].tracking_id = 55;
+        l2k_mapper_map(&m, body, 1, up, 0, 200000, L2K_SOURCE_SYNTHETIC, &f);
+        CHECK(f.skeletons[0].tracking_id == 1);
+        l2k_mapper_map(&m, body, 0, up, 0, 2000000, L2K_SOURCE_SYNTHETIC, &f);
+        CHECK(f.skeletons[0].state == L2K_SKELETON_NOT_TRACKED);
+        body[0].tracking_id = 56;
+        l2k_mapper_map(&m, body, 1, up, 0, 2100000, L2K_SOURCE_SYNTHETIC, &f);
+        CHECK(f.skeletons[0].state == L2K_SKELETON_TRACKED && f.skeletons[0].tracking_id == 2);
+    }
 
     /* missing optional joints are derived and flagged inferred; too little data = position only */
     l2k_synth_body(0.3, 0, 1, &body[0]);
@@ -384,7 +444,7 @@ static void test_mapping(void) {
     CHECK(s->joint_state[L2K_JOINT_FOOT_RIGHT] == L2K_JOINT_INFERRED);
     CHECK(s->joints[L2K_JOINT_FOOT_RIGHT].z < s->joints[L2K_JOINT_ANKLE_RIGHT].z); /* toes point at the sensor */
     body[0].conf[L2K_SRC_NECK] = 0;
-    l2k_mapper_map(&m, body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    l2k_mapper_map(&m, body, 1, up, 0, 2000000, L2K_SOURCE_SYNTHETIC, &f); /* well after the hold */
     CHECK(f.skeletons[0].state == L2K_SKELETON_POSITION_ONLY && f.skeletons[0].position.z > 2.0f);
 
     /* a joint the source loses is inferred, never "not tracked": never seen = on its parent,

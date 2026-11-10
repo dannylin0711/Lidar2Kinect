@@ -34,6 +34,12 @@ final class SensorModel: ObservableObject {
             session.pipeline.upperBodyMode = upperBodyOnly
         }
     }
+    @Published var keepPlayer: Bool {
+        didSet {
+            UserDefaults.standard.set(keepPlayer, forKey: "l2kKeepPlayer")
+            session.pipeline.keepIdentity = keepPlayer
+        }
+    }
     @Published var sourceStatus = "Not started"
     @Published var sourceError: String?
     @Published var senderStatus = L2KSender.Status()
@@ -82,7 +88,9 @@ final class SensorModel: ObservableObject {
         players = max(1, defaults.integer(forKey: "l2kPlayers"))
         previewMode = PreviewMode(rawValue: defaults.string(forKey: "l2kPreview") ?? "") ?? .color // -l2kPreview depth
         upperBodyOnly = defaults.bool(forKey: "l2kUpperBody") // also a launch argument: -l2kUpperBody 1
+        keepPlayer = defaults.object(forKey: "l2kKeepPlayer") as? Bool ?? true // -l2kKeepPlayer 0
         session.pipeline.upperBodyMode = upperBodyOnly
+        session.pipeline.keepIdentity = keepPlayer
         session.deviceName = UIDevice.current.name
     }
 

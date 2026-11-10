@@ -39,6 +39,14 @@ public final class L2KPipeline {
     private var quadrant: Int32 = -1
     private let settingsLock = NSLock()
     private var wantedUpperBody = false
+    private var wantedKeepIdentity = true
+
+    /// A player who is lost and comes back gets the slot and tracking id they had (on by default). Off: a returning
+    /// player is a new one after the half-second hold, as on a Kinect. Safe to set from any thread.
+    public var keepIdentity: Bool {
+        get { settingsLock.lock(); defer { settingsLock.unlock() }; return wantedKeepIdentity }
+        set { settingsLock.lock(); wantedKeepIdentity = newValue; settingsLock.unlock() }
+    }
 
     /// Upper-body mode: track a player seen from about the waist up. The legs become a made-up standing pose
     /// (reported inferred) and every frame carries L2K_FRAME_UPPER_BODY. Safe to set from any thread.
@@ -62,6 +70,7 @@ public final class L2KPipeline {
                         wantDepthPreview: Bool = false, colorPreviewZoom: Float = 1) -> L2KFrame {
         let q = updateQuadrant(up: source.upCamera)
         mapper.params.upper_body = upperBodyMode ? 1 : 0
+        mapper.params.keep_identity = keepIdentity ? 1 : 0
         var skeleton = l2k_skeleton_frame()
         let up = l2k_vec3(x: source.upCamera.x, y: source.upCamera.y, z: source.upCamera.z)
         source.bodies.withUnsafeBufferPointer { bodies in

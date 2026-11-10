@@ -68,7 +68,22 @@ typedef struct l2k_map_params {
     float upper_torso_ratio; /* neck-to-pelvis length = ratio * shoulder width, when the source gives no pelvis */
     float upper_hip_ratio;   /* hip joint to pelvis centre = ratio * shoulder width */
     float upper_leg_ratio;   /* hip-to-ankle length = ratio * neck-to-pelvis length */
+    /* Keeping a player through dropouts (see below). */
+    float hold_seconds;      /* a body the source loses keeps being reported, frozen, for this long */
+    uint8_t keep_identity;   /* nonzero: a body that comes back gets the slot and tracking id it had */
+    float identity_seconds;  /* how long an absent player's identity is kept; 0 = for as long as the mapper lives */
 } l2k_map_params;
+
+/* Dropouts. A camera-based source loses a body far more easily than a Kinect does (one missed
+ * detection is enough), and Dance Evolution follows its player by tracking id: a player who comes
+ * back under a new id is a stranger to it. So the mapper, not the source, owns the identities:
+ *   - the tracking ids it reports are its own (1, 2, ...), not the source's;
+ *   - a body missing for up to `hold_seconds` is still reported, in its slot, with its last
+ *     skeleton and every joint INFERRED - a short gap is invisible to the game;
+ *   - after that the slot is empty, but with `keep_identity` its slot and tracking id stay
+ *     reserved, and the next body the source reports takes over the reserved identity nearest to
+ *     where it stands. With `keep_identity` off the identity is dropped once the hold ends, and a
+ *     returning body gets a new id, as on a Kinect. */
 
 /* Upper-body mode, for a camera that only sees the player from about the waist up.
  *   - A body is tracked from its neck and both shoulders; a pelvis is not required (when the source
@@ -84,7 +99,12 @@ void l2k_map_params_default(l2k_map_params *params);
 typedef struct l2k_mapper {
     l2k_map_params params;
     uint32_t frame_number;
-    uint32_t slot_id[L2K_SKELETON_SLOTS]; /* tracking id held by each slot, 0 = free */
+    uint32_t slot_id[L2K_SKELETON_SLOTS]; /* source id bound to each slot now, 0 = none */
+    uint32_t out_id[L2K_SKELETON_SLOTS];  /* the tracking id each slot reports, 0 = the slot has no identity */
+    uint32_t next_out_id;
+    uint64_t last_seen_us[L2K_SKELETON_SLOTS]; /* when the slot's body was last tracked */
+    uint8_t has_last[L2K_SKELETON_SLOTS];
+    l2k_skeleton last[L2K_SKELETON_SLOTS];     /* its last tracked skeleton */
     float sensor_height;                  /* metres above the floor */
     int floor_valid;
     int floor_fixed;

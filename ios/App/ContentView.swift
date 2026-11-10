@@ -106,6 +106,11 @@ struct ContentView: View {
                 Text("For a camera that sees you from the waist up. Your arms and head are tracked; the legs are filled in standing still, so foot and step notes will miss.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
+            Toggle("Keep the same player", isOn: $model.keepPlayer)
+            Text(model.keepPlayer
+                 ? "A player who is lost and comes back is the same player to the game. A gap of up to half a second is not shown to the game at all."
+                 : "A player lost for more than half a second comes back as a new player, as with a real Kinect.")
+                .font(.footnote).foregroundStyle(.secondary)
             if let error = model.sourceError {
                 Text(error).font(.footnote).foregroundStyle(.red)
             }

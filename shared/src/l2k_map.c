@@ -33,6 +33,9 @@ void l2k_map_params_default(l2k_map_params *p) {
     p->upper_torso_ratio = 1.40f;
     p->upper_hip_ratio = 0.26f;
     p->upper_leg_ratio = 1.60f;
+    p->hold_seconds = 0.5f;
+    p->keep_identity = 1;
+    p->identity_seconds = 0.0f;
 }
 
 void l2k_mapper_init(l2k_mapper *m, const l2k_map_params *params) {
@@ -248,15 +251,44 @@ static int floor_under(const l2k_map_params *prm, const l2k_skeleton *s, l2k_vec
     return found;
 }
 
+/* Roughly where a source body is, in skeleton space (to match it to a remembered player). */
+static int rough_position(const l2k_src_body *b, int quadrant, l2k_vec3 *out) {
+    static const uint8_t ORDER[4] = {L2K_SRC_PELVIS, L2K_SRC_NECK, L2K_SRC_HEAD, L2K_SRC_SHOULDER_LEFT};
+    l2k_vec3 sum = {0, 0, 0};
+    int i, known = 0;
+    for (i = 0; i < 4; i++) {
+        if (b->conf[ORDER[i]]) {
+            *out = l2k_camera_to_kinect(b->p[ORDER[i]], quadrant);
+            return 1;
+        }
+    }
+    for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) {
+        if (b->conf[i]) {
+            sum = v_add(sum, l2k_camera_to_kinect(b->p[i], quadrant));
+            known++;
+        }
+    }
+    if (!known) return 0;
+    *out = v_scale(sum, 1.0f / (float)known);
+    return 1;
+}
+
+static uint32_t new_out_id(l2k_mapper *m) {
+    if (++m->next_out_id == 0) m->next_out_id = 1;
+    return m->next_out_id;
+}
+
 void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l2k_vec3 up_camera,
                     int quadrant, uint64_t timestamp_us, uint8_t source_kind, l2k_skeleton_frame *out) {
     l2k_vec3 up_default = {0, 1, 0};
     l2k_vec3 up = v_unit(l2k_camera_to_kinect(up_camera, quadrant), up_default);
     uint32_t ids[L2K_SKELETON_SLOTS];
     int slot_of[L2K_SKELETON_SLOTS];
-    int i, s, n = body_count > L2K_SKELETON_SLOTS ? L2K_SKELETON_SLOTS : body_count;
+    int i, j, s, n = body_count > L2K_SKELETON_SLOTS ? L2K_SKELETON_SLOTS : body_count;
     int have_floor = 0;
     float floor_h = 0.0f;
+    uint64_t hold_us = (uint64_t)((m->params.hold_seconds > 0.0f ? m->params.hold_seconds : 0.0f) * 1e6f);
+    uint64_t identity_us = (uint64_t)((m->params.identity_seconds > 0.0f ? m->params.identity_seconds : 0.0f) * 1e6f);
 
     memset(out, 0, sizeof *out);
     out->timestamp_us = timestamp_us;
@@ -265,7 +297,7 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
     out->up = up;
     if (m->params.upper_body) out->flags |= L2K_FRAME_UPPER_BODY;
 
-    /* slots: a body keeps its slot while its id stays; a vanished id frees its slot */
+    /* 1. a body keeps its slot while the source keeps its id */
     for (i = 0; i < n; i++) {
         ids[i] = bodies[i].tracking_id ? bodies[i].tracking_id : 0x80000000u + (uint32_t)i;
         slot_of[i] = -1;
@@ -280,34 +312,88 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
                 break;
             }
         }
-        if (!keep) m->slot_id[s] = 0;
+        if (!keep) m->slot_id[s] = 0; /* gone from the source; the identity stays for now */
     }
-    for (i = 0; i < n; i++) {
-        if (slot_of[i] >= 0) continue;
-        for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
-            if (!m->slot_id[s]) {
-                m->slot_id[s] = ids[i];
-                slot_of[i] = s;
-                memset(&m->memory[s], 0, sizeof m->memory[s]); /* a new body: forget the last one's pose */
-                break;
-            }
+
+    /* 2. identities that have been absent too long are forgotten */
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+        uint64_t absent;
+        int expired;
+        if (m->slot_id[s] || !m->out_id[s]) continue;
+        absent = timestamp_us > m->last_seen_us[s] ? timestamp_us - m->last_seen_us[s] : 0;
+        if (m->params.keep_identity) expired = identity_us > 0 && absent > identity_us;
+        else expired = absent > hold_us;
+        if (expired) {
+            m->out_id[s] = 0;
+            m->has_last[s] = 0;
+            memset(&m->memory[s], 0, sizeof m->memory[s]);
         }
     }
 
+    /* 3. a body the source newly reports: the remembered player standing nearest, else a fresh slot */
+    for (i = 0; i < n; i++) {
+        l2k_vec3 pos;
+        int best = -1, have_pos;
+        float best_d = 0.0f;
+        if (slot_of[i] >= 0) continue;
+        have_pos = rough_position(&bodies[i], quadrant, &pos);
+        for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+            float d;
+            if (m->slot_id[s] || !m->out_id[s]) continue;
+            d = (have_pos && m->has_last[s]) ? v_len(v_sub(pos, m->last[s].position)) : 1e9f;
+            if (best < 0 || d < best_d) {
+                best = s;
+                best_d = d;
+            }
+        }
+        if (best < 0) {
+            for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+                if (!m->slot_id[s] && !m->out_id[s]) {
+                    best = s;
+                    m->out_id[s] = new_out_id(m);
+                    m->has_last[s] = 0;
+                    memset(&m->memory[s], 0, sizeof m->memory[s]); /* a new player: no remembered pose */
+                    break;
+                }
+            }
+        }
+        if (best < 0) continue; /* six players already */
+        m->slot_id[best] = ids[i];
+        slot_of[i] = best;
+    }
+
+    /* 4. the skeletons */
     for (i = 0; i < n; i++) {
         l2k_skeleton *sk;
         float h;
         if (slot_of[i] < 0) continue;
-        sk = &out->skeletons[slot_of[i]];
-        sk->state = map_body(&m->params, &bodies[i], quadrant, up, sk, (joint_memory *)(void *)&m->memory[slot_of[i]]);
+        s = slot_of[i];
+        sk = &out->skeletons[s];
+        sk->state = map_body(&m->params, &bodies[i], quadrant, up, sk, (joint_memory *)(void *)&m->memory[s]);
         if (sk->state == L2K_SKELETON_NOT_TRACKED) {
-            m->slot_id[slot_of[i]] = 0;
+            m->slot_id[s] = 0;
             continue;
         }
-        sk->tracking_id = ids[i];
-        if (sk->state == L2K_SKELETON_TRACKED && floor_under(&m->params, sk, up, &h)) {
+        sk->tracking_id = m->out_id[s];
+        if (sk->state != L2K_SKELETON_TRACKED) continue;
+        m->last[s] = *sk;
+        m->has_last[s] = 1;
+        m->last_seen_us[s] = timestamp_us;
+        if (floor_under(&m->params, sk, up, &h)) {
             if (!have_floor || h < floor_h) floor_h = h;
             have_floor = 1;
+        }
+    }
+
+    /* 5. a player not tracked in this frame is held at the last skeleton for a short while */
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+        uint64_t absent;
+        if (out->skeletons[s].state == L2K_SKELETON_TRACKED || !m->out_id[s] || !m->has_last[s]) continue;
+        absent = timestamp_us > m->last_seen_us[s] ? timestamp_us - m->last_seen_us[s] : 0;
+        if (absent > hold_us) continue;
+        out->skeletons[s] = m->last[s];
+        for (j = 0; j < L2K_JOINT_COUNT; j++) {
+            if (out->skeletons[s].joint_state[j] > L2K_JOINT_INFERRED) out->skeletons[s].joint_state[j] = L2K_JOINT_INFERRED;
         }
     }
 

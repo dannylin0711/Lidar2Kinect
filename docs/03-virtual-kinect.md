@@ -104,8 +104,22 @@ targets, step notes, the leg part of a pose) is judged against that standing pos
 not fake leg movement, so those notes miss unless the dancer happens to stand the same way. The
 three ratios are estimates.
 
-Slots: a body keeps its slot (0…5) while its tracking id stays; a body that disappears frees its
-slot at once.
+
+**Dropouts and identity.** A camera-based source loses a body far more easily than a Kinect (one
+missed detection is enough), and the game follows its player by tracking id — Danny observed that
+a player who is lost and comes back is not accepted as the same player, and the game does not go
+on. So the mapper owns the identities, not the source:
+
+- the tracking ids it reports are its own (1, 2, …);
+- a body missing for up to `hold_seconds` (0.5 s) is still reported in its slot, with its last
+  skeleton and every joint inferred: a short gap is invisible to the game;
+- after that the slot is empty, but with `keep_identity` (on by default; the app's "Keep the same
+  player" switch) the slot and tracking id stay reserved, and the next body the source reports
+  takes over the reserved identity nearest to where it stands. With it off the identity is dropped
+  when the hold ends and a returning body gets a new id, as on a Kinect.
+
+This is a deliberate departure from a real Kinect, which gives a re-entering player a new id.
+What exactly the game does when its tracked id disappears has not been read from the DLL yet.
 
 Quality bits: a joint beyond 97 % of the half field of view sets the matching clipped-edge bit.
 Which side the SDK calls "left" and "right" is taken to be the image's left and right — not yet

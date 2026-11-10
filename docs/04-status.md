@@ -26,6 +26,21 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-10 (late night, 2) — players kept through dropouts (Apple side)
+
+- Danny: when the game loses the player and the player comes back, the game does not see the same
+  person and will not go on. Cause on our side: any missed detection gave the body a new tracking id.
+- **`shared/` behaviour change (mapper):** tracking ids are now the mapper's own (1, 2, …); a lost
+  body is held for 0.5 s with its last skeleton (joints inferred); a returning body takes back the
+  nearest remembered slot and id (`keep_identity`, on by default). `l2k_mapper` and
+  `l2k_map_params` grew fields; the wire format and golden packets are unchanged.
+  `make -C shared test`: 941 checks. Windows side: rebuild; no code change expected.
+- Ultra-wide source: joint positions now come from Vision's 2D pose and distances from its 3D pose,
+  after device snapshots showed the 3D request's own image positions sitting off the body. Checked
+  on a picture on the Mac; not yet seen on a person on the device.
+- App 0.6.0: "Keep the same player" switch.
+- Open: what the game itself does when its tracked id disappears (to be read in the port's RE).
+
 ## 2026-11-10 (late night) — first runs on the iPhone, ultra-wide source (Apple side)
 
 - Signed builds now work from the command line (`xcodebuild -allowProvisioningUpdates`, a profile

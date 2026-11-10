@@ -13,8 +13,8 @@ settings:
   base:
     SWIFT_VERSION: "5"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
-    MARKETING_VERSION: "0.5.0"
-    CURRENT_PROJECT_VERSION: "6"
+    MARKETING_VERSION: "0.6.0"
+    CURRENT_PROJECT_VERSION: "7"
 
 # The Swift package at the repository root: L2KShared (the portable C library in ../shared) and L2KKit (../ios/Sources).
 packages:
