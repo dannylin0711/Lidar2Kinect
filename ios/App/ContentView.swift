@@ -73,6 +73,11 @@ struct ContentView: View {
                 Text("This device has no body tracking camera, so the test figure is used.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
+            Toggle("Upper body only", isOn: $model.upperBodyOnly)
+            if model.upperBodyOnly {
+                Text("For a camera that sees you from the waist up. Your arms and head are tracked; the legs are filled in standing still, so foot and step notes will miss.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             if let error = model.sourceError {
                 Text(error).font(.footnote).foregroundStyle(.red)
             }

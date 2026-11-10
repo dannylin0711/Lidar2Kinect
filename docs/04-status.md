@@ -26,6 +26,18 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-10 (evening) — upper-body mode (Apple side)
+
+- Danny asked for tracking of just the upper half of the body, with leg notes left to miss.
+- **`shared/` addition:** `l2k_map_params.upper_body` (+ three ratio fields) and the frame flag
+  `L2K_FRAME_UPPER_BODY` (flags bit 1; `docs/02` §4, `docs/03` §4). Existing packets and golden
+  files are unchanged; a receiver that ignores the flag keeps working. `make -C shared test`: 902 checks.
+- App 0.3.0: "Upper body only" switch (off by default, `-l2kUpperBody 1`).
+- Not run on a device. Whether ARKit detects a body at all with the legs out of frame is unknown.
+- Seen in passing: the app (in the simulator on the Mac) lists the PC's DNS-SD advertisement,
+  "DESKTOP-77BJ5IQ Lidar2Kinect", under "Found on this network" — the Windows side's open point
+  about the advertisement not having been seen from the app is answered for the simulator.
+
 ## 2026-11-10 (later) — first device run, LiDAR depth source (Apple side)
 
 - Danny installed 0.1.0 on a device: the body-tracking source reported no depth. ARKit's

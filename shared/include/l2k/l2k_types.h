@@ -71,7 +71,8 @@ enum {
 
 /* l2k_skeleton_frame.flags */
 enum {
-    L2K_FRAME_FLOOR_VALID = 0x1 /* floor_plane holds an estimate (else all zero, like NUI) */
+    L2K_FRAME_FLOOR_VALID = 0x1, /* floor_plane holds an estimate (else all zero, like NUI) */
+    L2K_FRAME_UPPER_BODY = 0x2   /* upper-body mode: the legs of every skeleton are a made-up standing pose */
 };
 
 /* Where a frame's body data came from (l2k_skeleton_frame.source_kind, l2k_hello.source_kind). */

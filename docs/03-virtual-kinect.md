@@ -88,6 +88,22 @@ the game: Dance Evolution drops a player to the rest pose unless all 20 joint st
 (read from the DLL in the port, `docs/16` there). A body with a pelvis (or both hips) and a neck
 is *tracked*; with less it is *position only*.
 
+**Upper-body mode** (`l2k_map_params.upper_body`, the app's "Upper body only" switch, off by
+default) is for a camera that sees the player from about the waist up:
+
+- a body is tracked from its neck and both shoulders; a pelvis is not required — when the source
+  has none it is placed straight below the neck, 1.4 × the shoulder width away;
+- the legs are never taken from the source: the hips sit 0.26 × the shoulder width either side of
+  the pelvis, the ankles 1.6 × the neck-to-pelvis length straight below them, the knees half way,
+  all reported inferred;
+- every frame carries the flag `L2K_FRAME_UPPER_BODY`, so a receiver can tell the legs are made
+  up; there is no floor estimate.
+
+The arms, head and shoulders are the player's own. Whatever the game judges on the legs (foot
+targets, step notes, the leg part of a pose) is judged against that standing pose: the layer does
+not fake leg movement, so those notes miss unless the dancer happens to stand the same way. The
+three ratios are estimates.
+
 Slots: a body keeps its slot (0…5) while its tracking id stays; a body that disappears frees its
 slot at once.
 

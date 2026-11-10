@@ -26,6 +26,12 @@ final class SensorModel: ObservableObject {
 
     @Published var sourceChoice: SourceChoice
     @Published var previewMode: PreviewMode = .color { didSet { applyPreviewMode() } }
+    @Published var upperBodyOnly: Bool {
+        didSet {
+            UserDefaults.standard.set(upperBodyOnly, forKey: "l2kUpperBody")
+            session.pipeline.upperBodyMode = upperBodyOnly
+        }
+    }
     @Published var sourceStatus = "Not started"
     @Published var sourceError: String?
     @Published var senderStatus = L2KSender.Status()
@@ -66,6 +72,8 @@ final class SensorModel: ObservableObject {
         host = defaults.string(forKey: "l2kHost") ?? ""
         port = defaults.string(forKey: "l2kPort") ?? String(L2K.defaultPort)
         players = max(1, defaults.integer(forKey: "l2kPlayers"))
+        upperBodyOnly = defaults.bool(forKey: "l2kUpperBody") // also a launch argument: -l2kUpperBody 1
+        session.pipeline.upperBodyMode = upperBodyOnly
         session.deviceName = UIDevice.current.name
     }
 

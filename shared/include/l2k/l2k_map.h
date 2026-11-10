@@ -62,7 +62,22 @@ typedef struct l2k_map_params {
     float ankle_height;     /* ankle / toe joint height above the floor, for the floor estimate (metres) */
     float toe_height;
     float clip_margin;      /* a joint beyond margin * half field of view sets a CLIPPED_* bit */
+    /* Upper-body mode (see below): proportions used to fill in the lower body, relative to the
+     * shoulder width (pelvis, hips) and to the neck-pelvis length (legs). */
+    uint8_t upper_body;     /* nonzero: upper-body mode */
+    float upper_torso_ratio; /* neck-to-pelvis length = ratio * shoulder width, when the source gives no pelvis */
+    float upper_hip_ratio;   /* hip joint to pelvis centre = ratio * shoulder width */
+    float upper_leg_ratio;   /* hip-to-ankle length = ratio * neck-to-pelvis length */
 } l2k_map_params;
+
+/* Upper-body mode, for a camera that only sees the player from about the waist up.
+ *   - A body is tracked from its neck and both shoulders; a pelvis is not required (when the source
+ *     has none, it is placed straight below the neck).
+ *   - The legs are never taken from the source: hips, knees, ankles and feet are a standing pose
+ *     straight down from the pelvis, reported INFERRED, so the skeleton stays complete.
+ *   - Every frame carries L2K_FRAME_UPPER_BODY, so a receiver knows the legs are made up.
+ * The arms, head and shoulders are the player's own. Anything a game judges on the legs is judged
+ * against the standing pose: the layer does not fake leg movement. */
 
 void l2k_map_params_default(l2k_map_params *params);
 

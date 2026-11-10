@@ -22,6 +22,15 @@ public final class L2KPipeline {
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private var mapper = l2k_mapper()
     private var quadrant: Int32 = -1
+    private let settingsLock = NSLock()
+    private var wantedUpperBody = false
+
+    /// Upper-body mode: track a player seen from about the waist up. The legs become a made-up standing pose
+    /// (reported inferred) and every frame carries L2K_FRAME_UPPER_BODY. Safe to set from any thread.
+    public var upperBodyMode: Bool {
+        get { settingsLock.lock(); defer { settingsLock.unlock() }; return wantedUpperBody }
+        set { settingsLock.lock(); wantedUpperBody = newValue; settingsLock.unlock() }
+    }
 
     public init() {
         l2k_mapper_init(&mapper, nil)
@@ -36,6 +45,7 @@ public final class L2KPipeline {
     /// - Parameter playersOnly: keep depth only on player pixels (L2K_DEPTH_MODE_PLAYERS).
     public func process(_ source: L2KSourceFrame, kind: UInt8, wantDepth: Bool, wantColor: Bool, playersOnly: Bool) -> L2KFrame {
         let q = updateQuadrant(up: source.upCamera)
+        mapper.params.upper_body = upperBodyMode ? 1 : 0
         var skeleton = l2k_skeleton_frame()
         let up = l2k_vec3(x: source.upCamera.x, y: source.upCamera.y, z: source.upCamera.z)
         source.bodies.withUnsafeBufferPointer { bodies in

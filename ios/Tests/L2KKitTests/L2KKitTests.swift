@@ -152,6 +152,31 @@ final class L2KKitTests: XCTestCase {
         XCTAssertFalse(b.jointStates.contains(UInt8(L2K_JOINT_NOT_TRACKED)))
     }
 
+    /// Upper-body mode through the pipeline: half a body is tracked, complete, and flagged.
+    func testUpperBodyMode() throws {
+        let source = SyntheticSource(players: 1)
+        var frame = source.frame(at: 0.5, timestamp: 10)
+        // the camera sees nothing below the chest
+        for joint in [L2K_SRC_PELVIS, L2K_SRC_HIP_LEFT, L2K_SRC_KNEE_LEFT, L2K_SRC_ANKLE_LEFT, L2K_SRC_TOE_LEFT,
+                      L2K_SRC_HIP_RIGHT, L2K_SRC_KNEE_RIGHT, L2K_SRC_ANKLE_RIGHT, L2K_SRC_TOE_RIGHT] {
+            withUnsafeMutableBytes(of: &frame.bodies[0].conf) { $0[Int(joint)] = 0 }
+        }
+        let normal = L2KPipeline().process(frame, kind: source.kind, wantDepth: false, wantColor: false, playersOnly: true)
+        XCTAssertTrue(normal.skeleton.trackedSkeletons.isEmpty)
+
+        let pipeline = L2KPipeline()
+        pipeline.upperBodyMode = true
+        let upper = pipeline.process(frame, kind: source.kind, wantDepth: true, wantColor: false, playersOnly: true)
+        XCTAssertNotEqual(upper.skeleton.flags & UInt32(L2K_FRAME_UPPER_BODY), 0)
+        let body = try XCTUnwrap(upper.skeleton.trackedSkeletons.first?.skeleton)
+        XCTAssertFalse(body.jointStates.contains(UInt8(L2K_JOINT_NOT_TRACKED)))
+        XCTAssertEqual(body.jointStates[KinectJoint.handLeft.rawValue], UInt8(L2K_JOINT_TRACKED))
+        XCTAssertEqual(body.jointStates[KinectJoint.kneeLeft.rawValue], UInt8(L2K_JOINT_INFERRED))
+        XCTAssertLessThan(body.position(of: .ankleLeft).y, body.position(of: .hipLeft).y)
+        // the depth image still shows a whole figure, drawn from the completed skeleton
+        XCTAssertGreaterThan(try XCTUnwrap(upper.depth).filter { l2k_depth_player($0) == 1 }.count, 1500)
+    }
+
     /// The sender against a minimal receiver on localhost: HELLO -> CONFIG -> the requested streams arrive and decode.
     func testSenderHandshakeAndStreams() throws {
         let listener = try NWListener(using: .udp, on: .any)

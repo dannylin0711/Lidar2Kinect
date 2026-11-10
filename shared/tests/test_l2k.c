@@ -416,6 +416,86 @@ static void test_mapping(void) {
     }
 }
 
+static void test_upper_body(void) {
+    static const uint8_t LOWER[9] = {L2K_SRC_PELVIS, L2K_SRC_HIP_LEFT, L2K_SRC_KNEE_LEFT, L2K_SRC_ANKLE_LEFT, L2K_SRC_TOE_LEFT,
+                                     L2K_SRC_HIP_RIGHT, L2K_SRC_KNEE_RIGHT, L2K_SRC_ANKLE_RIGHT, L2K_SRC_TOE_RIGHT};
+    static const uint8_t ARMS[10] = {L2K_JOINT_SHOULDER_CENTER, L2K_JOINT_HEAD, L2K_JOINT_SHOULDER_LEFT, L2K_JOINT_ELBOW_LEFT,
+                                     L2K_JOINT_WRIST_LEFT, L2K_JOINT_HAND_LEFT, L2K_JOINT_SHOULDER_RIGHT, L2K_JOINT_ELBOW_RIGHT,
+                                     L2K_JOINT_WRIST_RIGHT, L2K_JOINT_HAND_RIGHT};
+    l2k_mapper m;
+    l2k_map_params prm;
+    l2k_src_body full, upper;
+    l2k_skeleton_frame ref, f;
+    l2k_vec3 up = {0, 1, 0};
+    const l2k_skeleton *s;
+    int i, side;
+    float width;
+
+    l2k_synth_body(0.6, 0, 1, &full);
+    upper = full;
+    for (i = 0; i < 9; i++) upper.conf[LOWER[i]] = 0; /* the camera sees nothing below the chest */
+
+    /* reference: the whole body, normal mode */
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_map(&m, &full, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &ref);
+    CHECK(!(ref.flags & L2K_FRAME_UPPER_BODY));
+    /* normal mode cannot track half a body */
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_map(&m, &upper, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(f.skeletons[0].state == L2K_SKELETON_POSITION_ONLY);
+
+    /* upper-body mode tracks it, with a complete skeleton */
+    l2k_map_params_default(&prm);
+    prm.upper_body = 1;
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &upper, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    s = &f.skeletons[0];
+    CHECK(f.flags & L2K_FRAME_UPPER_BODY);
+    CHECK(!(f.flags & L2K_FRAME_FLOOR_VALID)); /* no real feet, so no floor estimate */
+    CHECK(s->state == L2K_SKELETON_TRACKED);
+    for (i = 0; i < L2K_JOINT_COUNT; i++) CHECK(s->joint_state[i] != L2K_JOINT_NOT_TRACKED);
+    /* the arms, head and shoulders are the player's own, unchanged */
+    for (i = 0; i < 10; i++) {
+        CHECK(s->joint_state[ARMS[i]] == L2K_JOINT_TRACKED);
+        CHECK(nearly(s->joints[ARMS[i]].x, ref.skeletons[0].joints[ARMS[i]].x, 1e-6f));
+        CHECK(nearly(s->joints[ARMS[i]].y, ref.skeletons[0].joints[ARMS[i]].y, 1e-6f));
+        CHECK(nearly(s->joints[ARMS[i]].z, ref.skeletons[0].joints[ARMS[i]].z, 1e-6f));
+    }
+    /* the lower body is a standing pose straight below the neck, all inferred */
+    width = s->joints[L2K_JOINT_SHOULDER_RIGHT].x - s->joints[L2K_JOINT_SHOULDER_LEFT].x;
+    CHECK(width > 0.3f && width < 0.5f);
+    CHECK(s->joint_state[L2K_JOINT_HIP_CENTER] == L2K_JOINT_INFERRED && s->joint_state[L2K_JOINT_SPINE] == L2K_JOINT_INFERRED);
+    CHECK(nearly(s->joints[L2K_JOINT_HIP_CENTER].x, s->joints[L2K_JOINT_SHOULDER_CENTER].x, 1e-5f));
+    CHECK(s->joints[L2K_JOINT_HIP_CENTER].y < s->joints[L2K_JOINT_SPINE].y);
+    CHECK(s->joints[L2K_JOINT_SPINE].y < s->joints[L2K_JOINT_SHOULDER_CENTER].y);
+    for (side = 0; side < 2; side++) {
+        int hip = side ? L2K_JOINT_HIP_RIGHT : L2K_JOINT_HIP_LEFT;
+        for (i = 0; i < 4; i++) CHECK(s->joint_state[hip + i] == L2K_JOINT_INFERRED);
+        CHECK(nearly(s->joints[hip + 1].x, s->joints[hip].x, 1e-5f) && nearly(s->joints[hip + 2].x, s->joints[hip].x, 1e-5f));
+        CHECK(s->joints[hip].y > s->joints[hip + 1].y && s->joints[hip + 1].y > s->joints[hip + 2].y);
+        CHECK(nearly(s->joints[hip].y - s->joints[hip + 2].y, 1.60f * 1.40f * width, 1e-4f)); /* leg = 1.6 x torso, torso = 1.4 x shoulders */
+        CHECK(s->joints[hip + 3].z < s->joints[hip + 2].z); /* toes towards the sensor */
+    }
+    CHECK(s->joints[L2K_JOINT_HIP_RIGHT].x > s->joints[L2K_JOINT_HIP_LEFT].x); /* same side as the shoulders */
+
+    /* legs the source does report are ignored in this mode: a lifted knee stays a standing leg */
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &full, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    s = &f.skeletons[0];
+    CHECK(s->state == L2K_SKELETON_TRACKED && s->joint_state[L2K_JOINT_KNEE_LEFT] == L2K_JOINT_INFERRED);
+    CHECK(nearly(s->joints[L2K_JOINT_KNEE_LEFT].z, s->joints[L2K_JOINT_HIP_LEFT].z, 1e-5f));
+    CHECK(nearly(s->joints[L2K_JOINT_KNEE_RIGHT].z, s->joints[L2K_JOINT_HIP_RIGHT].z, 1e-5f));
+    /* ...but a pelvis the source does see is used */
+    CHECK(s->joint_state[L2K_JOINT_HIP_CENTER] == L2K_JOINT_TRACKED);
+    CHECK(nearly(s->joints[L2K_JOINT_HIP_CENTER].y, ref.skeletons[0].joints[L2K_JOINT_HIP_CENTER].y, 1e-6f));
+
+    /* without shoulders there is nothing to build on */
+    upper.conf[L2K_SRC_SHOULDER_LEFT] = 0;
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &upper, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(f.skeletons[0].state == L2K_SKELETON_POSITION_ONLY);
+}
+
 static void test_virtual_camera(void) {
     /* a source camera wider than the virtual Kinect, off-centre principal point */
     l2k_src_camera cam = {0.78f, 1.04f, 0.51f, 0.49f};
@@ -627,6 +707,7 @@ int main(int argc, char **argv) {
     test_depth_codec();
     test_chunks();
     test_mapping();
+    test_upper_body();
     test_virtual_camera();
     test_depth_images();
     test_smoothing();

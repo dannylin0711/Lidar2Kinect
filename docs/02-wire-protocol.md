@@ -86,7 +86,7 @@ One packet is one whole skeleton frame.
 |---|---|---|
 | 16 | u64 | timestamp_us — capture time on the sender's clock |
 | 24 | u32 | frame_number — +1 per frame the sender produces |
-| 28 | u32 | flags — bit 0: floor plane valid |
+| 28 | u32 | flags — bit 0: floor plane valid; bit 1: upper-body mode (the legs of every skeleton are a made-up standing pose, see `docs/03` §4) |
 | 32 | f32[4] | floor plane A, B, C, D (all zero when not valid) |
 | 48 | f32[3] | up — unit vector opposite to gravity, in skeleton space |
 | 60 | u8 | body_count — number of body records that follow (0…6) |

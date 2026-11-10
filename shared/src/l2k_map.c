@@ -29,6 +29,10 @@ void l2k_map_params_default(l2k_map_params *p) {
     p->ankle_height = 0.08f;
     p->toe_height = 0.03f;
     p->clip_margin = 0.97f;
+    p->upper_body = 0;
+    p->upper_torso_ratio = 1.40f;
+    p->upper_hip_ratio = 0.26f;
+    p->upper_leg_ratio = 1.60f;
 }
 
 void l2k_mapper_init(l2k_mapper *m, const l2k_map_params *params) {
@@ -87,9 +91,10 @@ typedef struct {
 static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int quadrant, l2k_vec3 up, l2k_skeleton *s, joint_memory *mem) {
     l2k_vec3 k[L2K_SRC_JOINT_COUNT];
     uint8_t conf[L2K_SRC_JOINT_COUNT];
-    l2k_vec3 pelvis, neck, torso, sum = {0, 0, 0};
+    l2k_vec3 pelvis, neck, torso, sum = {0, 0, 0}, shoulder_line = {1, 0, 0};
+    float shoulder_width = 0.38f; /* used only if upper-body mode has a pelvis but no shoulders */
     uint8_t pelvis_conf, core_conf;
-    int i, known = 0;
+    int i, known = 0, have_shoulders = 0;
     size_t d;
 
     for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) {
@@ -102,11 +107,28 @@ static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int qu
     }
     if (!known) return L2K_SKELETON_NOT_TRACKED;
 
+    if (prm->upper_body) {
+        /* upper-body mode: the legs are never the source's (they are filled in below) */
+        static const uint8_t LEGS[8] = {L2K_SRC_HIP_LEFT, L2K_SRC_KNEE_LEFT, L2K_SRC_ANKLE_LEFT, L2K_SRC_TOE_LEFT,
+                                        L2K_SRC_HIP_RIGHT, L2K_SRC_KNEE_RIGHT, L2K_SRC_ANKLE_RIGHT, L2K_SRC_TOE_RIGHT};
+        for (i = 0; i < 8; i++) conf[LEGS[i]] = 0;
+        if (conf[L2K_SRC_SHOULDER_LEFT] && conf[L2K_SRC_SHOULDER_RIGHT]) {
+            shoulder_line = v_sub(k[L2K_SRC_SHOULDER_RIGHT], k[L2K_SRC_SHOULDER_LEFT]);
+            shoulder_width = v_len(shoulder_line);
+            have_shoulders = 1;
+        }
+    }
+
     pelvis = k[L2K_SRC_PELVIS];
     pelvis_conf = conf[L2K_SRC_PELVIS];
     if (!pelvis_conf && conf[L2K_SRC_HIP_LEFT] && conf[L2K_SRC_HIP_RIGHT]) {
         pelvis = v_scale(v_add(k[L2K_SRC_HIP_LEFT], k[L2K_SRC_HIP_RIGHT]), 0.5f);
         pelvis_conf = u8_min(conf[L2K_SRC_HIP_LEFT], conf[L2K_SRC_HIP_RIGHT]);
+    }
+    if (!pelvis_conf && prm->upper_body && have_shoulders && conf[L2K_SRC_NECK]) {
+        /* no pelvis in view: straight below the neck, a torso length away */
+        pelvis = v_sub(k[L2K_SRC_NECK], v_scale(up, prm->upper_torso_ratio * shoulder_width));
+        pelvis_conf = L2K_JOINT_INFERRED;
     }
     if (!pelvis_conf || !conf[L2K_SRC_NECK]) {
         /* not enough for a skeleton: report where the body is */
@@ -158,6 +180,26 @@ static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int qu
                 s->joints[out] = v_add(k[ankle], v_sub(v_scale(facing, prm->foot_length), v_scale(up, prm->foot_drop)));
                 s->joint_state[out] = L2K_JOINT_INFERRED;
             }
+        }
+    }
+
+    /* upper-body mode: a standing lower body, straight down from the pelvis */
+    if (prm->upper_body) {
+        l2k_vec3 x_default = {1, 0, 0}, fwd_default = {0, 0, -1};
+        /* the player's right, level: the shoulder line without its vertical part */
+        l2k_vec3 right = v_unit(v_sub(shoulder_line, v_scale(up, v_dot(shoulder_line, up))), x_default);
+        l2k_vec3 facing = v_unit(v_cross(up, right), fwd_default);
+        float hip_half = prm->upper_hip_ratio * shoulder_width;
+        float leg = prm->upper_leg_ratio * v_len(torso);
+        for (i = 0; i < 2; i++) {
+            int hip = i ? L2K_JOINT_HIP_RIGHT : L2K_JOINT_HIP_LEFT;
+            l2k_vec3 h = v_add(pelvis, v_scale(right, i ? hip_half : -hip_half));
+            l2k_vec3 a = v_sub(h, v_scale(up, leg));
+            s->joints[hip] = h;
+            s->joints[hip + 1] = v_scale(v_add(h, a), 0.5f); /* knee */
+            s->joints[hip + 2] = a;                          /* ankle */
+            s->joints[hip + 3] = v_add(a, v_sub(v_scale(facing, prm->foot_length), v_scale(up, prm->foot_drop))); /* foot */
+            s->joint_state[hip] = s->joint_state[hip + 1] = s->joint_state[hip + 2] = s->joint_state[hip + 3] = L2K_JOINT_INFERRED;
         }
     }
 
@@ -221,6 +263,7 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
     out->frame_number = ++m->frame_number;
     out->source_kind = source_kind;
     out->up = up;
+    if (m->params.upper_body) out->flags |= L2K_FRAME_UPPER_BODY;
 
     /* slots: a body keeps its slot while its id stays; a vanished id frees its slot */
     for (i = 0; i < n; i++) {
