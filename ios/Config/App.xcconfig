@@ -1,0 +1,7 @@
+// Build settings for the Lidar2Kinect app target, shared by Debug and Release. Tracked in git.
+// Machine-specific signing lives in ios/Signing.xcconfig (NOT tracked; see Signing.xcconfig.example).
+// "#include?" is optional, so simulator builds (CODE_SIGNING_ALLOWED=NO) need no signing setup.
+PRODUCT_BUNDLE_IDENTIFIER = dev.latowolf.lidar2kinect
+DEVELOPMENT_TEAM =
+
+#include? "../Signing.xcconfig"

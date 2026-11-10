@@ -1,0 +1,19 @@
+.DS_Store
+build/
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcresult
+*.pyc
+__pycache__/
+# machine-specific signing (see ios/Signing.xcconfig.example)
+ios/Signing.xcconfig
+# Windows build output
+windows/**/build/
+windows/**/out/
+*.obj
+*.pdb
+*.ilk
+*.exp
+.vs/

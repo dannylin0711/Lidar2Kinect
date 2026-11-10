@@ -1,0 +1,7 @@
+// Copy this file to ios/Signing.xcconfig (gitignored) and fill in your team id:
+// Xcode > Settings... > Accounts > your Apple ID > the 10-character Team ID.
+DEVELOPMENT_TEAM = ABCDE12345
+
+// A free (personal team) Apple ID works for sideloading, but the bundle id must then be unique
+// under that team. Uncomment to change it:
+// PRODUCT_BUNDLE_IDENTIFIER = dev.latowolf.lidar2kinect.yourname

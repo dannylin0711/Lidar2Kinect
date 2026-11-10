@@ -1,0 +1,124 @@
+/*
+ * Lidar2Kinect shared library - body source -> Kinect skeleton frame.
+ *
+ * A capture source (ARKit, Vision, a replay...) reports each body as a small set of anatomical
+ * joints in the source camera's space. l2k_mapper turns that into a Kinect v1 skeleton frame:
+ * axis change, the 20 Kinect joints (some derived), tracking states, slots, floor plane.
+ * See docs/03-virtual-kinect.md.
+ */
+#ifndef L2K_MAP_H
+#define L2K_MAP_H
+
+#include "l2k_types.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Source joints. LEFT / RIGHT are the person's own left / right. */
+enum {
+    L2K_SRC_PELVIS = 0,     /* centre between the hip joints (optional if both hips are given) */
+    L2K_SRC_NECK = 1,       /* base of the neck, between the shoulders */
+    L2K_SRC_HEAD = 2,       /* centre of the head */
+    L2K_SRC_SHOULDER_LEFT = 3,
+    L2K_SRC_ELBOW_LEFT = 4,
+    L2K_SRC_WRIST_LEFT = 5,
+    L2K_SRC_HAND_LEFT = 6,  /* centre of the palm (optional) */
+    L2K_SRC_SHOULDER_RIGHT = 7,
+    L2K_SRC_ELBOW_RIGHT = 8,
+    L2K_SRC_WRIST_RIGHT = 9,
+    L2K_SRC_HAND_RIGHT = 10,
+    L2K_SRC_HIP_LEFT = 11,  /* head of the femur */
+    L2K_SRC_KNEE_LEFT = 12,
+    L2K_SRC_ANKLE_LEFT = 13,
+    L2K_SRC_TOE_LEFT = 14,  /* ball of the foot (optional) */
+    L2K_SRC_HIP_RIGHT = 15,
+    L2K_SRC_KNEE_RIGHT = 16,
+    L2K_SRC_ANKLE_RIGHT = 17,
+    L2K_SRC_TOE_RIGHT = 18,
+    L2K_SRC_JOINT_COUNT = 19
+};
+
+/* One body from the source, in source camera space: +x image right, +y image up,
+ * +z towards the viewer (the camera looks along -z), metres. This is ARKit's camera space. */
+typedef struct l2k_src_body {
+    uint32_t tracking_id;                   /* stable per person; 0 = let the mapper number it */
+    l2k_vec3 p[L2K_SRC_JOINT_COUNT];
+    uint8_t conf[L2K_SRC_JOINT_COUNT];      /* 0 = missing, 1 = low confidence / estimated, 2 = tracked */
+} l2k_src_body;
+
+/* Tunables for the joints Kinect places differently from the anatomical source joints.
+ * The defaults are first estimates: they are to be calibrated against real Kinect v1 recordings
+ * (docs/03 "Calibration"), not facts about the Kinect. */
+typedef struct l2k_map_params {
+    float hip_center_lift;  /* HIP_CENTER = pelvis + lift * (neck - pelvis) */
+    float spine_fraction;   /* SPINE      = pelvis + fraction * (neck - pelvis) */
+    float hand_extension;   /* no hand joint: HAND = wrist + extension * (wrist - elbow) */
+    float foot_length;      /* no toe joint: FOOT = ankle + length * facing - drop * up (metres) */
+    float foot_drop;
+    float ankle_height;     /* ankle / toe joint height above the floor, for the floor estimate (metres) */
+    float toe_height;
+    float clip_margin;      /* a joint beyond margin * half field of view sets a CLIPPED_* bit */
+} l2k_map_params;
+
+void l2k_map_params_default(l2k_map_params *params);
+
+typedef struct l2k_mapper {
+    l2k_map_params params;
+    uint32_t frame_number;
+    uint32_t slot_id[L2K_SKELETON_SLOTS]; /* tracking id held by each slot, 0 = free */
+    float sensor_height;                  /* metres above the floor */
+    int floor_valid;
+    int floor_fixed;
+} l2k_mapper;
+
+/* params may be NULL for the defaults. */
+void l2k_mapper_init(l2k_mapper *m, const l2k_map_params *params);
+
+/* Give the mapper a measured sensor height above the floor (e.g. from plane detection).
+ * height <= 0 returns to estimating it from the feet. */
+void l2k_mapper_set_floor(l2k_mapper *m, float sensor_height_m);
+
+/* Build the next skeleton frame.
+ *   up_camera : world up (opposite to gravity) in source camera space
+ *   quadrant  : device roll in quarter turns, see l2k_quadrant_from_up() in l2k_depth.h */
+void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l2k_vec3 up_camera,
+                    int quadrant, uint64_t timestamp_us, uint8_t source_kind, l2k_skeleton_frame *out);
+
+/* Sensor tilt in degrees from a frame's `up` vector: positive = looking upwards
+ * (what NuiCameraElevationGetAngle reports). */
+float l2k_elevation_degrees(l2k_vec3 up);
+
+/* ---- joint smoothing (NuiTransformSmooth equivalent) ----
+ * Holt double exponential filter as published in Microsoft's "Skeletal Joint Smoothing" white
+ * paper sample. Parameter names and meaning follow NUI_TRANSFORM_SMOOTH_PARAMETERS. Whether its
+ * output matches Kinect10.dll's NuiTransformSmooth exactly is NOT verified (docs/01 "Open"). */
+typedef struct l2k_smooth_params {
+    float smoothing;            /* 0..1 */
+    float correction;           /* 0..1 */
+    float prediction;           /* frames */
+    float jitter_radius;        /* metres */
+    float max_deviation_radius; /* metres */
+} l2k_smooth_params;
+
+typedef struct l2k_smoother {
+    struct {
+        uint32_t tracking_id;
+        struct {
+            l2k_vec3 raw, filtered, trend;
+            uint32_t count;
+        } joint[L2K_JOINT_COUNT];
+    } slot[L2K_SKELETON_SLOTS];
+} l2k_smoother;
+
+/* The NUI defaults (also what Dance Evolution passes): 0.5, 0.5, 0.5, 0.05, 0.04. */
+void l2k_smooth_params_default(l2k_smooth_params *params);
+void l2k_smoother_init(l2k_smoother *s);
+/* Filters the joints of every tracked skeleton of `frame` in place. */
+void l2k_smoother_apply(l2k_smoother *s, l2k_skeleton_frame *frame, const l2k_smooth_params *params);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* L2K_MAP_H */
