@@ -110,9 +110,9 @@ before loading `gamekdm.dll` (unrelated to the Kinect). Logs of the runs: `l2k-r
 ### Open
 
 - **Sensor placement:** the game asks for +27° (the maximum upward tilt) although the cabinet's
-  Kinect is about 2 m up. Most likely an angled mount (Danny): the motor stops at its upper end and
-  the game reads back the angle reached — nothing to change in the DLL, but the cabinet's mount
-  angle is not confirmed. Also open: whether the judgement depends on sensor height like the
+  Kinect is about 2 m up. Most likely a tilted mount (Danny): RESET lifts the sensor 27° above the
+  mount's direction and the game reads back the angle reached — nothing to change in the DLL, but
+  the cabinet's mount angle is not confirmed. Also open: whether the judgement depends on sensor height like the
   SKELETON panel does (`docs/skeleton-panel.md`).
 - Not run with the real iPhone app yet (needs Danny): camera-source data, Wi-Fi rates, latency.
 - `NuiSkeletonSetTrackedSkeletons` is passed through, not enforced (the sender tracks ≤ 2 bodies;

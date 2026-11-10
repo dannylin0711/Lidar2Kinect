@@ -51,12 +51,14 @@ SENSOR CHECK shows three 120×90 panels: RGB CAMERA (`[$CameraImage]`), 3D DEPTH
 ## Open
 
 - **+27° is the motor's maximum upward tilt.** Danny: the cabinet's Kinect sits at the top, about
-  2 m up, probably on an angled mount. **Most likely reading:** the Kinect v1 elevation angle is
-  relative to gravity (SDK documentation, not checked here) while the motor moves only ±27° relative
-  to its base; on a mount that already points the sensor down, +27° cannot be reached, the motor
-  stops at its upper end, and the game reads back and prints the angle actually reached ("ELEVATION
-  ANGLE ADJUSTED (%d)" prints the current angle, `+ 0x1c`, not the 27 it asked for). RESET would
-  then mean "tilt as far up as the mount allows", the mount fixing the final angle. For the
+  2 m up, mounted tilted (pointing down). **Most likely reading:** RESET lifts the sensor 27° up
+  from the direction of its mount. Whether the SDK's angle is relative to the base or to gravity
+  (the SDK documentation says gravity; not checked here) gives the same result: relative to the
+  base, +27° is 27° above the mount; relative to gravity, +27° cannot be reached on a mount that
+  points down steeply, and the motor stops at its upper end — again 27° above the mount. The game
+  then reads back and prints the angle actually reached ("ELEVATION ANGLE ADJUSTED (%d)" prints the
+  current angle, `+ 0x1c`, not the 27 it asked for). If a real cabinet frames a player 2.5 m away
+  like the −24° fake scene, its mount would point about 51° down (−24 − 27). For the
   replacement this changes nothing: it reports the phone's real tilt, and ignoring `SetAngle`
   behaves like a motor already at its stop. Not confirmed: the mount angle of a real cabinet.
   Other readings ruled less likely: an upright, level-based Kinect at 2 m tilted up 27° would not

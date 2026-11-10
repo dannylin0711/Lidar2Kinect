@@ -183,6 +183,6 @@ In the virtual Kinect the two images come from the same camera, so the mapping i
    position depends on the sensor height only; a 2.5 m player is centred with the sensor ≈ 1.4 m up
    (measured in four placements). RESET ELEVATION ANGLE asks for `NuiCameraElevationSetAngle(27)`,
    the maximum *upward* tilt (observed), while the cabinet's Kinect is about 2 m up (Danny),
-   probably on an angled mount: most likely the motor stops at its upper end and the game prints
-   the angle reached. The mount angle is not confirmed. —
+   mounted tilted down: most likely RESET lifts the sensor 27° above the mount's direction and the
+   game prints the angle reached. The mount angle is not confirmed. —
    `windows/docs/skeleton-panel.md`.
