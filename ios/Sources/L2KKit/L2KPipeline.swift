@@ -3,6 +3,7 @@ import CoreImage
 import CoreVideo
 import Foundation
 import L2KShared
+import simd
 
 /// One frame of the virtual Kinect.
 public struct L2KFrame {
@@ -21,6 +22,8 @@ public struct L2KFrame {
     /// Kinect's (640x480; the Kinect's own image is its central 1/zoom). nil unless a zoom above 1 was requested.
     public var colorPreview: CIImage?
     public var colorPreviewZoom: Float = 1
+    /// Where the first body really stands: its level distance from the sensor in metres, before any play-area fit.
+    public var realDistance: Float?
 }
 
 /// The raw depth map resampled to the virtual Kinect image (320x240).
@@ -40,6 +43,17 @@ public final class L2KPipeline {
     private let settingsLock = NSLock()
     private var wantedUpperBody = false
     private var wantedKeepIdentity = true
+    private var wantedFitPlayArea = false
+
+    /// Slide a player who stands outside the game's play area (1.8-3.2 m from the sensor, 1.25 m either side) just
+    /// inside it, and keep the reported floor consistent with the body. Off by default here. Safe to set from any thread.
+    public var fitPlayArea: Bool {
+        get { settingsLock.lock(); defer { settingsLock.unlock() }; return wantedFitPlayArea }
+        set { settingsLock.lock(); wantedFitPlayArea = newValue; settingsLock.unlock() }
+    }
+
+    /// The play area Dance Evolution accepts a player in (read from the game, docs/01 section 8), in metres.
+    public static let playAreaNear: Float = 1.80, playAreaFar: Float = 3.20, playAreaHalfWidth: Float = 1.25
 
     /// A player who is lost and comes back gets the slot and tracking id they had (on by default). Off: a returning
     /// player is a new one after the half-second hold, as on a Kinect. Safe to set from any thread.
@@ -71,6 +85,7 @@ public final class L2KPipeline {
         let q = updateQuadrant(up: source.upCamera)
         mapper.params.upper_body = upperBodyMode ? 1 : 0
         mapper.params.keep_identity = keepIdentity ? 1 : 0
+        mapper.params.fit_play_area = fitPlayArea ? 1 : 0
         var skeleton = l2k_skeleton_frame()
         let up = l2k_vec3(x: source.upCamera.x, y: source.upCamera.y, z: source.upCamera.z)
         source.bodies.withUnsafeBufferPointer { bodies in
@@ -78,6 +93,7 @@ public final class L2KPipeline {
                            UInt64(source.timestamp * 1_000_000), kind, &skeleton)
         }
         var frame = L2KFrame(skeleton: skeleton, depth: nil, color: nil, quadrant: q)
+        frame.realDistance = Self.realDistance(of: source.bodies.first, quadrant: q, up: skeleton.up)
         if wantDepth {
             frame.depth = depthImage(source, skeleton: &skeleton, quadrant: q, playersOnly: playersOnly)
         }
@@ -100,6 +116,20 @@ public final class L2KPipeline {
             CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality,
         ]
         return ciContext.jpegRepresentation(of: color, colorSpace: colorSpace, options: options)
+    }
+
+    /// Level distance from the sensor of a source body (its pelvis, else its neck), nil if neither is known.
+    static func realDistance(of body: l2k_src_body?, quadrant: Int32, up: l2k_vec3) -> Float? {
+        guard let body else { return nil }
+        let conf = withUnsafeBytes(of: body.conf) { Array($0) }
+        let positions = withUnsafeBytes(of: body.p) { Array($0.bindMemory(to: l2k_vec3.self)) }
+        guard let index = [Int(L2K_SRC_PELVIS), Int(L2K_SRC_NECK)].first(where: { conf[$0] != 0 }) else { return nil }
+        let p = l2k_camera_to_kinect(positions[index], quadrant)
+        let upV = SIMD3(up.x, up.y, up.z)
+        var forward = SIMD3<Float>(0, 0, 1) - upV * upV.z
+        guard simd_length(forward) > 1e-4 else { return nil }
+        forward = simd_normalize(forward)
+        return simd_dot(SIMD3(p.x, p.y, p.z), forward)
     }
 
     // MARK: - roll

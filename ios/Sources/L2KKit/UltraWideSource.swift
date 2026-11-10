@@ -166,7 +166,7 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
         let quadrant = l2k_quadrant_from_up(up.x, up.y)
 
         let visionStart = ProcessInfo.processInfo.systemUptime
-        let joints = detector.detect(in: image, quadrant: quadrant)
+        let joints = detector.detect(in: image, quadrant: quadrant, camera: camera)
         let poseMs = (ProcessInfo.processInfo.systemUptime - visionStart) * 1000
         // The silhouette changes slowly compared with the pose: refresh the mask on every second frame.
         if frames % 2 == 1 || lastMask == nil { lastMask = masker.mask(of: image) }

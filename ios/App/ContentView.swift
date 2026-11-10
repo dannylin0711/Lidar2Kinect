@@ -125,6 +125,11 @@ struct ContentView: View {
                 Text("For a camera that sees you from the waist up. Your arms and head are tracked; the legs are filled in standing still, so foot and step notes will miss.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
+            Toggle("Fit me into the game's play area", isOn: $model.fitPlayArea)
+            Text(model.fitPlayArea
+                 ? "If you stand nearer than 1.8 m, farther than 3.2 m or more than 1.25 m to one side, the game is told you are just inside those limits. Your pose is not changed."
+                 : "You are reported where you really stand. The game ignores a player outside 1.8–3.2 m from the sensor or more than 1.25 m to one side.")
+                .font(.footnote).foregroundStyle(.secondary)
             Toggle("Keep the same player", isOn: $model.keepPlayer)
             Text(model.keepPlayer
                  ? "A player who is lost and comes back is the same player to the game. A gap of up to half a second is not shown to the game at all."
@@ -142,7 +147,14 @@ struct ContentView: View {
                 Row("Height above floor", skeleton.flags & UInt32(L2K_FRAME_FLOOR_VALID) != 0
                     ? String(format: "%.2f m", skeleton.floor_plane.w) : "not known yet")
                 if let body = skeleton.trackedSkeletons.first?.skeleton {
-                    Row("Distance", String(format: "%.2f m", body.position.z))
+                    let real = model.realDistance ?? body.position.z
+                    Row("Distance", String(format: "%.2f m", real))
+                    if real < L2KPipeline.playAreaNear || real > L2KPipeline.playAreaFar {
+                        Text(model.fitPlayArea
+                             ? String(format: "The game only takes a player 1.8–3.2 m away. You are reported to it at %.2f m.", body.position.z)
+                             : "The game only takes a player 1.8–3.2 m away: it will not pick you up here.")
+                            .font(.footnote).foregroundStyle(model.fitPlayArea ? Color.secondary : Color.orange)
+                    }
                 }
             }
         }

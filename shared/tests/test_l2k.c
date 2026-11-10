@@ -556,6 +556,78 @@ static void test_upper_body(void) {
     CHECK(f.skeletons[0].state == L2K_SKELETON_POSITION_ONLY);
 }
 
+static void test_play_area(void) {
+    l2k_mapper m;
+    l2k_map_params prm;
+    l2k_src_body body, moved;
+    l2k_skeleton_frame ref, f;
+    l2k_vec3 up = {0, 1, 0};
+    int i, j;
+
+    l2k_map_params_default(&prm);
+    CHECK(prm.fit_play_area == 0);
+    prm.fit_play_area = 1;
+
+    /* a body at 2.5 m, in the middle: inside, untouched */
+    l2k_synth_body(0.0, 0, 1, &body);
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_map(&m, &body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &ref);
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(ref.skeletons[0].position.z > 1.9f && ref.skeletons[0].position.z < 3.1f);
+    for (j = 0; j < L2K_JOINT_COUNT; j++) CHECK(nearly(f.skeletons[0].joints[j].z, ref.skeletons[0].joints[j].z, 0.0f));
+
+    /* the same body standing 1.2 m from the sensor and 2 m to one side: slid to 1.9 m and 1.15 m, its shape unchanged */
+    moved = body;
+    for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) {
+        moved.p[i].z += 1.3f;  /* camera space: +z is towards the viewer, so this is nearer */
+        moved.p[i].x += 2.0f;  /* camera +x = Kinect -x */
+    }
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_map(&m, &moved, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &ref);
+    CHECK(ref.skeletons[0].position.z < 1.5f && ref.skeletons[0].position.x < -1.5f);
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &moved, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(nearly(f.skeletons[0].position.z, 1.90f, 1e-5f));
+    CHECK(nearly(f.skeletons[0].position.x, -1.15f, 1e-5f));
+    CHECK(nearly(f.skeletons[0].position.y, ref.skeletons[0].position.y, 1e-6f)); /* never moved vertically */
+    for (j = 0; j < L2K_JOINT_COUNT; j++) {
+        CHECK(nearly(f.skeletons[0].joints[j].x - f.skeletons[0].position.x, ref.skeletons[0].joints[j].x - ref.skeletons[0].position.x, 1e-5f));
+        CHECK(nearly(f.skeletons[0].joints[j].y, ref.skeletons[0].joints[j].y, 1e-6f));
+        CHECK(nearly(f.skeletons[0].joints[j].z - f.skeletons[0].position.z, ref.skeletons[0].joints[j].z - ref.skeletons[0].position.z, 1e-5f));
+    }
+
+    /* a sensor looking 30 degrees down: "horizontal" follows gravity, not the optical axis */
+    {
+        l2k_vec3 up_tilted = {0.0f, 0.8660254f, 0.5f}; /* in camera space; in skeleton space it is (0, 0.866, -0.5) */
+        float d, h0, h1;
+        l2k_vec3 fwd = {0.0f, 0.5f, 0.8660254f}; /* level forward for that up: z - up (z . up), normalised */
+        l2k_mapper_init(&m, NULL);
+        l2k_mapper_map(&m, &moved, 1, up_tilted, 0, 0, L2K_SOURCE_SYNTHETIC, &ref);
+        l2k_mapper_init(&m, &prm);
+        l2k_mapper_map(&m, &moved, 1, up_tilted, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+        CHECK(nearly(f.up.z, -0.5f, 1e-6f) && nearly(l2k_elevation_degrees(f.up), -30.0f, 0.01f));
+        d = f.skeletons[0].position.y * fwd.y + f.skeletons[0].position.z * fwd.z;
+        CHECK(nearly(d, 1.90f, 1e-4f));
+        h0 = ref.skeletons[0].position.y * f.up.y + ref.skeletons[0].position.z * f.up.z;
+        h1 = f.skeletons[0].position.y * f.up.y + f.skeletons[0].position.z * f.up.z;
+        CHECK(nearly(h0, h1, 1e-5f)); /* height above the floor unchanged */
+    }
+
+    /* the floor: with no usable feet the reported floor still puts the hip at a human height */
+    for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) body.conf[i] = body.conf[i] ? 1 : 0; /* nothing "tracked": no floor from the feet */
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(f.flags & L2K_FRAME_FLOOR_VALID);
+    {
+        float hip_height = f.skeletons[0].position.y + f.floor_plane.w;
+        CHECK(hip_height >= 0.40f - 1e-5f && hip_height <= 1.60f + 1e-5f);
+    }
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_map(&m, &body, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(!(f.flags & L2K_FRAME_FLOOR_VALID)); /* without the option: no floor is claimed */
+}
+
 static void test_virtual_camera(void) {
     /* a source camera wider than the virtual Kinect, off-centre principal point */
     l2k_src_camera cam = {0.78f, 1.04f, 0.51f, 0.49f};
@@ -768,6 +840,7 @@ int main(int argc, char **argv) {
     test_chunks();
     test_mapping();
     test_upper_body();
+    test_play_area();
     test_virtual_camera();
     test_depth_images();
     test_smoothing();

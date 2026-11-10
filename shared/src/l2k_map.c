@@ -36,6 +36,12 @@ void l2k_map_params_default(l2k_map_params *p) {
     p->hold_seconds = 0.5f;
     p->keep_identity = 1;
     p->identity_seconds = 0.0f;
+    p->fit_play_area = 0;
+    p->area_near = 1.90f;      /* the game accepts 1.80 .. 3.20 m: stay 10 cm inside */
+    p->area_far = 3.10f;
+    p->area_half_width = 1.15f; /* the game accepts +-1.25 m */
+    p->area_hip_min = 0.40f;    /* the game accepts a hip 0 .. 2 m above its floor */
+    p->area_hip_max = 1.60f;
 }
 
 void l2k_mapper_init(l2k_mapper *m, const l2k_map_params *params) {
@@ -385,6 +391,28 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
         }
     }
 
+    /* 4b. play area: a tracked body outside it slides horizontally to just inside */
+    if (m->params.fit_play_area) {
+        l2k_vec3 z_axis = {0, 0, 1}, x_default = {1, 0, 0};
+        l2k_vec3 forward = v_unit(v_sub(z_axis, v_scale(up, v_dot(z_axis, up))), z_axis); /* level, away from the sensor */
+        l2k_vec3 side = v_unit(v_cross(up, forward), x_default);
+        for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+            l2k_skeleton *sk = &out->skeletons[s];
+            float d, x, d2, x2;
+            l2k_vec3 shift;
+            if (sk->state != L2K_SKELETON_TRACKED) continue;
+            d = v_dot(sk->position, forward);
+            x = v_dot(sk->position, side);
+            d2 = d < m->params.area_near ? m->params.area_near : d > m->params.area_far ? m->params.area_far : d;
+            x2 = x < -m->params.area_half_width ? -m->params.area_half_width : x > m->params.area_half_width ? m->params.area_half_width : x;
+            if (d2 == d && x2 == x) continue;
+            shift = v_add(v_scale(forward, d2 - d), v_scale(side, x2 - x));
+            sk->position = v_add(sk->position, shift);
+            for (j = 0; j < L2K_JOINT_COUNT; j++) sk->joints[j] = v_add(sk->joints[j], shift);
+            m->last[s] = *sk; /* a held skeleton is held where the game saw it */
+        }
+    }
+
     /* 5. a player not tracked in this frame is held at the last skeleton for a short while */
     for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
         uint64_t absent;
@@ -404,6 +432,23 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
             if (!m->floor_valid) m->sensor_height = height;
             else m->sensor_height += (height - m->sensor_height) * (height > m->sensor_height ? 0.5f : 0.01f);
             m->floor_valid = 1;
+        }
+    }
+    /* play area, vertically: the floor the game is told about must put the first player's hip at a human height */
+    if (m->params.fit_play_area && !m->floor_fixed) {
+        for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+            float hip;
+            if (out->skeletons[s].state != L2K_SKELETON_TRACKED) continue;
+            hip = v_dot(up, out->skeletons[s].position); /* relative to the sensor, along up */
+            if (!m->floor_valid) {
+                m->sensor_height = 0.5f * (m->params.area_hip_min + m->params.area_hip_max) - hip;
+                m->floor_valid = 1;
+            } else if (hip + m->sensor_height < m->params.area_hip_min) {
+                m->sensor_height = m->params.area_hip_min - hip;
+            } else if (hip + m->sensor_height > m->params.area_hip_max) {
+                m->sensor_height = m->params.area_hip_max - hip;
+            }
+            break;
         }
     }
     if (m->floor_valid) {

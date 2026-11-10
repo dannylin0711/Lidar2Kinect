@@ -72,7 +72,23 @@ typedef struct l2k_map_params {
     float hold_seconds;      /* a body the source loses keeps being reported, frozen, for this long */
     uint8_t keep_identity;   /* nonzero: a body that comes back gets the slot and tracking id it had */
     float identity_seconds;  /* how long an absent player's identity is kept; 0 = for as long as the mapper lives */
+    /* Fitting the player into the game's play area (see below). */
+    uint8_t fit_play_area;   /* nonzero: move a tracked body that stands outside the play area just inside it */
+    float area_near, area_far; /* horizontal distance from the sensor, metres */
+    float area_half_width;     /* sideways from the sensor's axis, metres */
+    float area_hip_min, area_hip_max; /* hip height above the floor the game is told about, metres */
 } l2k_map_params;
+
+/* The play area. Dance Evolution only takes a body as a player while its position lies in a box in
+ * front of the sensor: 1.80 to 3.20 m away, 1.25 m either side, 0 to 2 m above the floor it is told
+ * about - with 5 cm of slack to be taken on and 20 cm to be kept (read from gamekdm.dll and run under
+ * an emulator, docs/01 section 8). A phone with a wide lens invites standing closer than that, and a
+ * player who drops out while standing in the 15 cm band between the two margins cannot get back in.
+ * The game's judging does not use where the player stands (it maps limb directions onto the dancer),
+ * so with `fit_play_area` the mapper slides a tracked body that is outside the area horizontally to
+ * just inside it (10 cm in from the edges), and makes the floor it reports agree with the body
+ * (the hip between area_hip_min and area_hip_max above it). A body already inside is not touched.
+ * The depth and colour images are not changed: they show where the player really is. */
 
 /* Dropouts. A camera-based source loses a body far more easily than a Kinect does (one missed
  * detection is enough), and Dance Evolution follows its player by tracking id: a player who comes

@@ -121,6 +121,16 @@ on. So the mapper owns the identities, not the source:
 This is a deliberate departure from a real Kinect, which gives a re-entering player a new id.
 What exactly the game does when its tracked id disappears has not been read from the DLL yet.
 
+**Play area.** The game only takes a body as a player inside a box in front of the sensor —
+1.80 to 3.20 m away, 1.25 m either side, hip 0 to 2 m above the floor it is told about, with 5 cm
+of slack to be taken on and 20 cm to be kept (`docs/01` §7). A wide lens invites standing closer
+than that. The game's judging does not use where the player stands, so with `fit_play_area` (the
+app's "Fit me into the game's play area", on by default in the app, off in the library) the mapper
+slides a tracked body that is outside the box horizontally to 10 cm inside its edge, joints and
+`Position` together, and keeps the floor it reports consistent with the body (hip between 0.4 and
+1.6 m above it) when there is no measured floor. A body already inside is not touched. The depth
+and colour images are not changed, so in this case they no longer line up with the skeleton.
+
 Quality bits: a joint beyond 97 % of the half field of view sets the matching clipped-edge bit.
 Which side the SDK calls "left" and "right" is taken to be the image's left and right — not yet
 checked against a real sensor.
@@ -195,6 +205,13 @@ proportion but only roughly in scale. The Kinect images still have the Kinect's 
 they show the middle of what the camera sees, while the skeleton carries every joint (those outside
 the image set the clipped-edge bits). The app's colour preview zooms out to twice the Kinect's view
 and frames the Kinect's own image with a dashed rectangle.
+
+**Ultra-wide, depths.** Device snapshots showed the 3D request's pose sitting off the body, so its
+depths are not used either. Each joint is placed on its image ray at the bone's length from its
+parent joint (`VisionKinematics`); of the two points that satisfy that, the 3D model only decides
+which — towards the camera or away. Bone lengths are the 3D model's, averaged over time. The root
+(pelvis) keeps the model's distance. Tested on the Mac against a known body; not yet judged on a
+person.
 
 **Measured on the iPhone 17 Pro (2026-11-10).**
 

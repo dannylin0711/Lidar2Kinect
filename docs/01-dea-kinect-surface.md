@@ -167,7 +167,40 @@ draws the colour image through a quad that lines it up with the depth image.
 In the virtual Kinect the two images come from the same camera, so the mapping is exact:
 `colourX = 2·depthX`, `colourY = 2·depthY`, at every depth.
 
-## 7. Open points
+## 7. How the game takes a body as a player **[DLL, run under an emulator]**
+
+Read from `gamekdm.dll` and confirmed by running the DLL's own functions under Unicorn on the Mac
+(`tools/play_area_emu.py` in the port's repository), 2026-11-10.
+
+- **Every frame** (`FUN_100e4a30`) the game rebuilds a table of candidates, one per skeleton slot
+  (`FUN_100e4140`). A slot is a candidate when its tracking state is not 0 and its **`Position`**,
+  moved into the game's own space, lies in a box: centre (0, 1.0, 0), half-size (1.22, 1.0, 0.675)
+  metres (`FUN_100e4a80`; distance to the box by `FUN_101ab6d0`). The slack is **5 cm to become a
+  candidate and 20 cm to stay one**. A slot whose tracking id changes starts again at 5 cm.
+- **The game's space** is `Position × M`, `M` = (tilt and floor) × base. The base (`FUN_10019520`,
+  into `DAT_103d4a30`) mirrors x and maps the distance `z` to `2.5 − z`. The other factor
+  (`FUN_10018570`) removes the tilt (from the elevation angle the game read) and adds the sensor's
+  height: the `w` of the frame's floor clip plane when the plane is not all zero, otherwise an
+  estimate the game makes itself from the feet of a player standing upright, smoothed 5 % per frame.
+- **In sensor terms**, for a level sensor: a body is taken on only between **1.80 m and 3.20 m**
+  from the sensor, within **1.25 m** either side of its axis, with its `Position` between 0 and
+  2 m above the floor the game was told about (measured with the emulator: accepted 1.80…3.20 m
+  and ±1.25 m). Once taken on it is kept from about 1.63 m to 3.37 m.
+- **Who the player is.** In one-player mode (`FUN_100e46d0`) the game picks, every frame, the
+  candidate nearest to the point 1.8 m in front of the sensor; in two-player mode
+  (`FUN_100e47d0`) each candidate goes to the nearer of two points 0.61 m either side of that. It
+  then asks the SDK to track those ids (`NuiSkeletonSetTrackedSkeletons`) and follows them by id
+  (`FUN_100102b0`). **A returning player does not need the old tracking id** — the choice is made
+  afresh each frame — but must be a candidate again, i.e. inside the box with the 5 cm slack.
+- Other constants set by `FUN_100e4a80` (2.44 m, 1.3 m, 2.65 m, 2.0 m) are not used by the
+  candidate test; their use is not traced.
+
+Consequences for the translation layer (`docs/03` §4, "Play area"): a player standing nearer
+than 1.8 m is never taken on; a player in the 15 cm band between the two slacks is kept but, after
+any dropout longer than the sender's hold, cannot come back; and a floor height that disagrees with
+the body (hip not within 0–2 m of it) removes the player just as well.
+
+## 8. Open points
 
 1. ~~Export ordinals of the real `Kinect10.dll`~~ — **resolved 2026-11-10** (§2; ordinal 9 corrected).
 2. ~~Whether `l2k_smoother_apply` matches the real DLL's `NuiTransformSmooth`~~ — **resolved

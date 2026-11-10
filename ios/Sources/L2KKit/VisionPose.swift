@@ -177,6 +177,71 @@ final class VisionBody3DDetector {
     }
 }
 
+/// Rebuilding a 3D pose from where the joints are in the picture, how long the bones are, and - for each bone -
+/// whether it points towards the camera or away from it.
+///
+/// A single camera fixes the ray each joint lies on but not how far along it. Given the parent joint's 3D position
+/// and the bone's length, the child joint is one of the (at most) two points of its ray at that distance from the
+/// parent: one nearer the camera than the foot of the perpendicular, one farther. Which of the two is the only thing
+/// taken from the 3D body model; the model's own depths, which drift when it does not fit the picture, are not used.
+enum VisionKinematics {
+    /// (joint, parent), from the trunk outwards, for a body rooted at the pelvis.
+    static let tree: [(Int, Int)] = [
+        (Int(L2K_SRC_NECK), Int(L2K_SRC_PELVIS)), (Int(L2K_SRC_HEAD), Int(L2K_SRC_NECK)),
+        (Int(L2K_SRC_SHOULDER_LEFT), Int(L2K_SRC_NECK)), (Int(L2K_SRC_ELBOW_LEFT), Int(L2K_SRC_SHOULDER_LEFT)), (Int(L2K_SRC_WRIST_LEFT), Int(L2K_SRC_ELBOW_LEFT)),
+        (Int(L2K_SRC_SHOULDER_RIGHT), Int(L2K_SRC_NECK)), (Int(L2K_SRC_ELBOW_RIGHT), Int(L2K_SRC_SHOULDER_RIGHT)), (Int(L2K_SRC_WRIST_RIGHT), Int(L2K_SRC_ELBOW_RIGHT)),
+        (Int(L2K_SRC_HIP_LEFT), Int(L2K_SRC_PELVIS)), (Int(L2K_SRC_KNEE_LEFT), Int(L2K_SRC_HIP_LEFT)), (Int(L2K_SRC_ANKLE_LEFT), Int(L2K_SRC_KNEE_LEFT)),
+        (Int(L2K_SRC_HIP_RIGHT), Int(L2K_SRC_PELVIS)), (Int(L2K_SRC_KNEE_RIGHT), Int(L2K_SRC_HIP_RIGHT)), (Int(L2K_SRC_ANKLE_RIGHT), Int(L2K_SRC_KNEE_RIGHT)),
+    ]
+
+    /// The camera-space point (x image right, y image up, looking along -z) of an image position at an optical-axis distance.
+    static func point(u: Float, v: Float, depth: Float, camera: l2k_src_camera) -> SIMD3<Float> {
+        SIMD3((u - camera.cxn) / camera.fxn * depth, -(v - camera.cyn) / camera.fyn * depth, -depth)
+    }
+
+    /// The child joint on the ray through (u, v), `length` away from `parent`. `away` picks the solution farther from
+    /// the camera. When the ray passes farther than `length` from the parent (the picture disagrees with the bone
+    /// length), the nearest point of the ray is used.
+    static func child(parent: SIMD3<Float>, u: Float, v: Float, length: Float, away: Bool, camera: l2k_src_camera) -> SIMD3<Float> {
+        let ray = simd_normalize(point(u: u, v: v, depth: 1, camera: camera))
+        let along = simd_dot(ray, parent) // the foot of the perpendicular from the parent
+        let discriminant = along * along - simd_length_squared(parent) + length * length
+        let t = discriminant > 0 ? along + (away ? 1 : -1) * discriminant.squareRoot() : along
+        return ray * max(t, 0.05)
+    }
+
+    /// Whether, in a model pose, the child is on the far side of the foot of the perpendicular from its parent.
+    static func isAway(parent: SIMD3<Float>, child: SIMD3<Float>) -> Bool {
+        let ray = simd_normalize(child)
+        return simd_length(child) > simd_dot(ray, parent)
+    }
+
+    /// Re-place `joints` (their u, v kept, their depths replaced): the root keeps `rootDepth`; every other joint is
+    /// solved from its parent with the bone `lengths` and the towards / `away` choice per joint. Joints whose parent
+    /// or length is unknown keep the depth they came with.
+    static func lift(_ joints: [VisionJoint3D], lengths: [Int: Float], away: [Int: Bool], camera: l2k_src_camera) -> [VisionJoint3D] {
+        var bySource = Dictionary(uniqueKeysWithValues: joints.map { ($0.source, $0) })
+        var points: [Int: SIMD3<Float>] = [:]
+        let root = bySource[Int(L2K_SRC_PELVIS)] != nil ? Int(L2K_SRC_PELVIS) : Int(L2K_SRC_NECK)
+        guard let rootJoint = bySource[root] else { return joints }
+        points[root] = point(u: rootJoint.u, v: rootJoint.v, depth: rootJoint.depth, camera: camera)
+        var edges = tree
+        if root == Int(L2K_SRC_NECK) { edges.removeFirst() } // no pelvis: the neck is the root
+        for (joint, parent) in edges {
+            guard var j = bySource[joint] else { continue }
+            if let p = points[parent], let length = lengths[joint] {
+                let c = child(parent: p, u: j.u, v: j.v, length: length, away: away[joint] ?? false, camera: camera)
+                j.depth = -c.z
+                points[joint] = c
+            } else {
+                points[joint] = point(u: j.u, v: j.v, depth: j.depth, camera: camera)
+            }
+            bySource[joint] = j
+        }
+        return joints.map { bySource[$0.source] ?? $0 }
+    }
+}
+
 /// Camera-only 3D pose that stays on the picture: where each joint is in the image comes from Vision's 2D body pose
 /// (its 2D detector follows the body in the image closely), and how far away each joint is comes from Vision's 3D body
 /// pose (which fits a whole-body model and can sit visibly off the picture when the body is close, leaning or cut off
@@ -204,7 +269,11 @@ final class VisionHybridDetector {
         (Int(L2K_SRC_PELVIS), Int(L2K_SRC_NECK)),
     ]
 
-    func detect(in image: CVPixelBuffer, quadrant: Int32) -> [VisionJoint3D] {
+    /// Bone lengths of the person in view (metres, keyed by the child joint), averaged over time from the 3D model:
+    /// a person's proportions are the stable part of what the model reports.
+    private var boneLengths: [Int: Float] = [:]
+
+    func detect(in image: CVPixelBuffer, quadrant: Int32, camera: l2k_src_camera) -> [VisionJoint3D] {
         let handler = VNImageRequestHandler(cvPixelBuffer: image, orientation: VisionOrientation.orientation(forQuadrant: quadrant), options: [:])
         do {
             try handler.perform([request2D, request3D])
@@ -250,7 +319,20 @@ final class VisionHybridDetector {
             joints.append(joint)
         }
         lastModelOnly = joints.count - lastSeen
-        return joints
+
+        // Depths: from the picture and the bone lengths, with the model saying only which way each bone leans.
+        var modelPoints: [Int: SIMD3<Float>] = [:]
+        for m in model { modelPoints[m.source] = VisionKinematics.point(u: m.u, v: m.v, depth: m.depth, camera: camera) }
+        var away: [Int: Bool] = [:]
+        for (joint, parent) in VisionKinematics.tree {
+            guard let c = modelPoints[joint], let p = modelPoints[parent] else { continue }
+            let length = simd_distance(c, p)
+            if length > 0.02, length < 1.2 {
+                boneLengths[joint] = boneLengths[joint].map { $0 * 0.9 + length * 0.1 } ?? length
+            }
+            away[joint] = VisionKinematics.isAway(parent: p, child: c)
+        }
+        return VisionKinematics.lift(joints, lengths: boneLengths, away: away, camera: camera)
     }
 }
 

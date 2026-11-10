@@ -11,6 +11,32 @@ struct SensorPreview: View {
 
     private static let slotColors: [Color] = [.green, .cyan, .yellow, .pink, .purple, .mint]
 
+    /// A small view from above in the top-right corner: what the game is told about where the player is and how far
+    /// each limb reaches towards the sensor - the part a front view cannot show. The sensor is at the bottom, the
+    /// frame is the game's play area (1.8-3.2 m away, 1.25 m either side).
+    private func drawTopView(_ skeleton: l2k_skeleton_frame, in context: inout GraphicsContext, size: CGSize) {
+        let box = CGRect(x: size.width * 0.70, y: size.height * 0.03, width: size.width * 0.27, height: size.width * 0.27 * 4.0 / 3.6)
+        context.fill(Path(roundedRect: box, cornerRadius: 6), with: .color(.black.opacity(0.55)))
+        // metres -> points: x from -1.8 to +1.8 (mirrored like the picture), distance 0 (bottom) to 4 m (top)
+        func point(_ p: l2k_vec3) -> CGPoint {
+            CGPoint(x: box.midX + CGFloat(p.x) / 3.6 * box.width, y: box.maxY - CGFloat(p.z) / 4.0 * box.height)
+        }
+        let area = CGRect(origin: point(l2k_vec3(x: -1.25, y: 0, z: 3.2)),
+                          size: CGSize(width: 2.5 / 3.6 * box.width, height: 1.4 / 4.0 * box.height))
+        context.stroke(Path(area), with: .color(.white.opacity(0.5)), lineWidth: 1)
+        context.fill(Path(ellipseIn: CGRect(x: box.midX - 3, y: box.maxY - 6, width: 6, height: 6)), with: .color(.white))
+        for (slot, body) in skeleton.trackedSkeletons {
+            let color = Self.slotColors[slot % Self.slotColors.count]
+            for (a, b) in KinectJoint.bones {
+                var path = Path()
+                path.move(to: point(body.position(of: a)))
+                path.addLine(to: point(body.position(of: b)))
+                let side = Self.side(of: b)
+                context.stroke(path, with: .color(side < 0 ? .orange : side > 0 ? .blue : color), lineWidth: 1.5)
+            }
+        }
+    }
+
     /// -1 = a joint of the player's left side, +1 = right side, 0 = the middle.
     private static func side(of joint: KinectJoint) -> Int {
         switch joint {
@@ -34,6 +60,7 @@ struct SensorPreview: View {
                 context.stroke(Path(inner), with: .color(.white.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
             }
             guard let skeleton else { return }
+            drawTopView(skeleton, in: &context, size: size)
             for (slot, body) in skeleton.trackedSkeletons {
                 let color = Self.slotColors[slot % Self.slotColors.count]
                 let positions = body.jointPositions

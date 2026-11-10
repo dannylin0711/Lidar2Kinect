@@ -26,6 +26,25 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-10 (late night, 5) — why a player cannot come back; play-area fit; ultra-wide depths (Apple side)
+
+- Danny, playing the real game with the app: (1) the left hand is wrong in the game though right
+  in the app's picture; (2) after a detection failure mid-game the player cannot reconnect.
+- (2) is the game's own rule, now read from the DLL and run under the emulator (`docs/01` §7): a
+  body is a player candidate only 1.80–3.20 m from the sensor, ±1.25 m sideways, hip 0–2 m above
+  the reported floor; 5 cm slack to enter, 20 cm to stay. The tracking id is not what blocks a
+  return. In ultra-wide mode Danny stood about 1.2–1.6 m away, and that mode's floor estimate was
+  unstable.
+- **`shared/` addition:** `fit_play_area` (+ area parameters) in `l2k_map_params`: slides a tracked
+  body outside the box to just inside, keeps the floor consistent. Off by default in the library,
+  on by default in the app ("Fit me into the game's play area"). 1033 checks.
+- (1): the app's picture only shows the 2D projection; in ultra-wide mode the depths came from the
+  3D model, which does not fit the picture well. Depths are now solved from the picture and bone
+  lengths (`VisionKinematics`, `docs/03` §7). Also new: a top-down inset in the preview so depth
+  errors can be seen. **Not yet checked on a person.** If Danny plays in LiDAR mode instead, this
+  change does not apply and (1) is still unexplained.
+- App 0.7.0.
+
 ## 2026-11-10 (late night, 4) — colour stream can be switched off (Apple side)
 
 - Danny asked for an option to disable the RGB camera feed. App 0.6.2: "Send the camera picture"

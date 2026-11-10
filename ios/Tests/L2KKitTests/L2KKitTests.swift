@@ -254,7 +254,7 @@ final class L2KKitTests: XCTestCase {
         print("L2K-VISION 3D joints: \(joints.count) height \(detector.lastHeight) error \(detector.lastError ?? "none")")
         print("L2K-VISION 3D " + joints.map { String(format: "%d:(%.2f,%.2f,%.2fm)", $0.source, $0.u, $0.v, $0.depth) }.joined(separator: " "))
         let hybrid = VisionHybridDetector()
-        let mixed = hybrid.detect(in: pixels, quadrant: 0)
+        let mixed = hybrid.detect(in: pixels, quadrant: 0, camera: l2k_src_camera(fxn: 0.6, fyn: 1.07, cxn: 0.5, cyn: 0.5))
         print("L2K-VISION hybrid joints: \(mixed.count), from the picture \(hybrid.lastSeen), from the model \(hybrid.lastModelOnly)")
         print("L2K-VISION hybrid " + mixed.map { String(format: "%d:(%.2f,%.2f,%.2fm,c%d)", $0.source, $0.u, $0.v, $0.depth, $0.confidence) }.joined(separator: " "))
     }
@@ -326,6 +326,39 @@ final class L2KKitTests: XCTestCase {
         defer { lock.unlock() }
         XCTAssertEqual(colourPackets, 0)
         XCTAssertEqual(offered, L2K.streamSkeleton | L2K.streamDepth)
+    }
+
+    /// Picture positions + bone lengths + "towards or away" give back the 3D body they came from.
+    func testKinematicLiftRecoversTheBody() {
+        let camera = l2k_src_camera(fxn: 0.38, fyn: 0.68, cxn: 0.5, cyn: 0.5) // an ultra-wide lens
+        for t in [0.0, 0.4, 1.1, 1.7] {
+            var truth = l2k_src_body()
+            l2k_synth_body(t, 0, 1, &truth)
+            let positions = withUnsafeBytes(of: truth.p) { Array($0.bindMemory(to: l2k_vec3.self)) }.map { SIMD3($0.x, $0.y, $0.z) }
+            func image(_ p: SIMD3<Float>) -> (Float, Float) { (camera.cxn + camera.fxn * p.x / -p.z, camera.cyn - camera.fyn * p.y / -p.z) }
+            var lengths: [Int: Float] = [:], away: [Int: Bool] = [:]
+            for (joint, parent) in VisionKinematics.tree {
+                lengths[joint] = simd_distance(positions[joint], positions[parent])
+                away[joint] = VisionKinematics.isAway(parent: positions[parent], child: positions[joint])
+            }
+            // every joint arrives with the right picture position and a WRONG depth (the root excepted)
+            let sources = [Int(L2K_SRC_PELVIS)] + VisionKinematics.tree.map(\.0)
+            let joints = sources.map { source -> VisionJoint3D in
+                let (u, v) = image(positions[source])
+                return VisionJoint3D(source: source, u: u, v: v, depth: source == Int(L2K_SRC_PELVIS) ? -positions[source].z : 9)
+            }
+            let lifted = VisionKinematics.lift(joints, lengths: lengths, away: away, camera: camera)
+            for joint in lifted {
+                let p = VisionKinematics.point(u: joint.u, v: joint.v, depth: joint.depth, camera: camera)
+                XCTAssertEqual(simd_distance(p, positions[joint.source]), 0, accuracy: 2e-3, "joint \(joint.source) at t=\(t)")
+            }
+            // a bone the picture says is longer than its length (the body is nearer than the lengths imply) does not blow up
+            var short = lengths
+            short[Int(L2K_SRC_WRIST_LEFT)] = 0.01
+            let clipped = VisionKinematics.lift(joints, lengths: short, away: away, camera: camera)
+            let wrist = clipped.first { $0.source == Int(L2K_SRC_WRIST_LEFT) }!
+            XCTAssertTrue(wrist.depth.isFinite && wrist.depth > 0.5 && wrist.depth < 5)
+        }
     }
 
     func testPersonTrackerKeepsIdentities() {
