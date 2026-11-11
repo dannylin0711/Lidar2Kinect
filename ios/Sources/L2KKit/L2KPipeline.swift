@@ -27,6 +27,12 @@ public struct L2KFrame {
     /// The skeletons as the camera sees them, before the play-area fit or the normalising moved them: draw these
     /// over the camera picture. Equal to `skeleton` when neither is on.
     public var pictureSkeleton: l2k_skeleton_frame?
+    /// The part of the camera picture `depth` and `color` show (see `L2KGameView`): the Kinect's own view unless the
+    /// skeleton was moved by the play-area fit or the normalising.
+    public var gameView = L2KGameView.identity
+    /// The frame was (also) made for the local consumer: it carries the local-only images that were asked for.
+    /// Frames in between, made only to be sent, do not - a preview must not show them.
+    public var forLocal = false
 }
 
 /// The raw depth map resampled to the virtual Kinect image (320x240).
@@ -89,8 +95,59 @@ public final class L2KPipeline {
         set { settingsLock.lock(); wantedUpperBody = newValue; settingsLock.unlock() }
     }
 
+    private var wantedImagesFollow = true
+    private var gameView = L2KGameView.identity
+    private var gameViewSet = false
+
+    /// Frame the depth and colour images on the skeleton that is sent (`L2KGameView`), so that a player who is
+    /// reported somewhere else than the camera sees them - fitted into the play area, or normalised - is in the
+    /// images where the skeleton says. On by default. Off: the images are always the middle of the camera picture.
+    /// Safe to set from any thread.
+    public var imagesFollowSkeleton: Bool {
+        get { settingsLock.lock(); defer { settingsLock.unlock() }; return wantedImagesFollow }
+        set { settingsLock.lock(); wantedImagesFollow = newValue; settingsLock.unlock() }
+    }
+
     public init() {
         l2k_mapper_init(&mapper, nil)
+    }
+
+    /// Where the joints of the tracked skeletons fall in a 320 × 240 Kinect image: of the skeletons that are sent and
+    /// of the same skeletons as the camera sees them, joint for joint.
+    private static func jointPixels(sent: l2k_skeleton_frame, picture: l2k_skeleton_frame) -> (sent: [SIMD2<Float>], picture: [SIMD2<Float>]) {
+        var a: [SIMD2<Float>] = [], b: [SIMD2<Float>] = []
+        let seen = Dictionary(uniqueKeysWithValues: picture.trackedSkeletons.map { ($0.slot, $0.skeleton) })
+        for (slot, body) in sent.trackedSkeletons {
+            guard let other = seen[slot] else { continue }
+            let p = body.jointPositions, q = other.jointPositions, states = body.jointStates
+            for index in 0..<min(p.count, q.count) where states[index] != UInt8(L2K_JOINT_NOT_TRACKED) {
+                var u: Float = 0, v: Float = 0, s: Float = 0, t: Float = 0
+                guard l2k_skeleton_to_depth_pixel(p[index], 320, 240, &u, &v) == 1,
+                      l2k_skeleton_to_depth_pixel(q[index], 320, 240, &s, &t) == 1 else { continue }
+                a.append(SIMD2(u, v))
+                b.append(SIMD2(s, t))
+            }
+        }
+        return (a, b)
+    }
+
+    /// The view for this frame's images: eased towards the fit so that it does not shake with the joints, and
+    /// back to the Kinect's own view when nobody is tracked.
+    private func updateGameView(sent: l2k_skeleton_frame, picture: l2k_skeleton_frame) -> L2KGameView {
+        guard imagesFollowSkeleton else {
+            gameView = .identity
+            gameViewSet = false
+            return gameView
+        }
+        let points = Self.jointPixels(sent: sent, picture: picture)
+        if let fit = L2KGameView.fitting(sent: points.sent, picture: points.picture) {
+            gameView = gameViewSet ? gameView.eased(towards: fit, by: 0.3) : fit
+            gameViewSet = true
+        } else {
+            gameView = gameView.eased(towards: .identity, by: 0.03)
+            if gameView.isIdentity { gameViewSet = false }
+        }
+        return gameView
     }
 
     /// Give a measured sensor height above the floor (metres); <= 0 returns to estimating it from the feet.
@@ -121,11 +178,14 @@ public final class L2KPipeline {
         var picture = skeleton
         picture.skeletons = mapper.picture
         frame.pictureSkeleton = picture
+        // The images go where the skeleton that is sent is (the same skeleton when nothing moved it: no change).
+        frame.gameView = updateGameView(sent: skeleton, picture: picture)
+        let gameCamera = frame.gameView.isIdentity ? source.camera : frame.gameView.camera(source.camera, quadrant: q)
         if wantDepth {
-            frame.depth = depthImage(source, skeleton: &skeleton, quadrant: q, playersOnly: playersOnly)
+            frame.depth = depthImage(source, camera: gameCamera, skeleton: &skeleton, quadrant: q, playersOnly: playersOnly)
         }
         if wantColor, let image = source.image {
-            frame.color = colorImage(image, camera: source.camera, quadrant: q)
+            frame.color = colorImage(image, camera: gameCamera, quadrant: q)
         }
         if wantDepthPreview {
             frame.depthPreview = depthPreview(source, quadrant: q)
@@ -175,7 +235,8 @@ public final class L2KPipeline {
 
     // MARK: - depth
 
-    private func depthImage(_ source: L2KSourceFrame, skeleton: inout l2k_skeleton_frame, quadrant: Int32, playersOnly: Bool) -> [UInt16] {
+    private func depthImage(_ source: L2KSourceFrame, camera gameCamera: l2k_src_camera, skeleton: inout l2k_skeleton_frame, quadrant: Int32,
+                            playersOnly: Bool) -> [UInt16] {
         let width = Int32(L2K_DEPTH_WIDTH), height = Int32(L2K_DEPTH_HEIGHT)
         var pixels = [UInt16](repeating: 0, count: Int(width * height))
         let depthMap = source.depthMap.flatMap { CVPixelBufferGetPixelFormatType($0) == kCVPixelFormatType_DepthFloat32 ? $0 : nil }
@@ -193,7 +254,7 @@ public final class L2KPipeline {
         src.player_index = UInt8((tracked.first?.slot ?? 0) + 1)
         src.players_only = (playersOnly && mask != nil) ? 1 : 0
         src.fallback_depth_m = tracked.first.map { $0.skeleton.position.z } ?? 0
-        var camera = source.camera
+        var camera = gameCamera
 
         if let depthMap { CVPixelBufferLockBaseAddress(depthMap, .readOnly) }
         if let mask { CVPixelBufferLockBaseAddress(mask, .readOnly) }

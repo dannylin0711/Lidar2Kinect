@@ -228,9 +228,23 @@ the image and its distance along the optical axis; the 3D point is rebuilt with 
 intrinsics (`VisionBody3DDetector.place`), so it does not depend on Vision's axis conventions.
 Vision assumes a body height of 1.80 m when it cannot measure one, so distances are right in
 proportion but only roughly in scale (a person 1.62 m tall is reported 11 % too far). The Kinect images still have the Kinect's field of view:
-they show the middle of what the camera sees, while the skeleton carries every joint (those outside
-the image set the clipped-edge bits). The app's colour preview zooms out until the whole camera
+they show part of what the camera sees, while the skeleton carries every joint (those outside
+the image set the clipped-edge bits). Which part: see "Where the images look" below. The app's colour preview zooms out until the whole camera
 image shows (`L2KCameraView.zoomToFit`) and frames the Kinect's own image with a dashed rectangle.
+
+**Where the images look (0.9.2, every source).** When the skeleton is sent as the camera sees it,
+the depth and colour images are the middle of the camera picture at the Kinect's field of view.
+When the skeleton is moved — the play-area fit, or the normalising — the images move with it
+(`L2KGameView`, `L2KPipeline.imagesFollowSkeleton`, on by default): the joints of the sent skeleton
+and of the skeleton as the camera sees it are both projected into a 320×240 Kinect image, and the
+images are scaled (by the ratio of how far the two sets of points spread) and shifted (by their
+centres) inside the camera picture until the player lies where the sent skeleton is. The scale and
+shift are applied as another focal length and principal point of the source camera
+(`L2KGameView.camera`; the virtual-to-source mapping is affine), eased over a few frames, and
+return to the plain view when nobody is tracked. Before 0.9.2 a player normalised to 2.5 m while
+standing close to a wide camera was sent with a picture of their face (Danny, 2026-11-11). Depth
+values are not changed: a measured depth map still carries the real distances. The app's preview
+frames the part the game gets with the dashed rectangle. `-l2kImagesFollow 0` switches it off.
 
 **The picture Vision gets (0.9.1).** Not the camera buffer: the buffer turned upright for the
 device's roll and fitted, with black bars, into a fixed 720×1280 picture (1280×720 when the upright

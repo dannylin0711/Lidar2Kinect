@@ -12,8 +12,11 @@ import SwiftUI
 final class LiveState: ObservableObject {
     @Published var preview: CGImage?
     @Published var skeleton: l2k_skeleton_frame?
-    /// The skeletons as the camera sees them (before the fit / the normalising), for drawing over the picture.
+    /// The skeletons as the camera sees them (before the fit / the normalising), for drawing over the camera's own
+    /// picture; nil while the picture shown is one made for the game.
     @Published var pictureSkeleton: l2k_skeleton_frame?
+    /// The part of the camera picture the game's images show.
+    @Published var gameView = L2KGameView.identity
     /// The zoom of the picture currently shown (the depth preview is never zoomed).
     @Published var shownZoom: CGFloat = 1
     @Published var frameRate: Double = 0
@@ -137,6 +140,8 @@ final class SensorModel: ObservableObject {
         normalizePlayers = defaults.object(forKey: "l2kNormalizePlayers") as? Int ?? 1 // -l2kNormalizePlayers 2
         fitPlayArea = defaults.object(forKey: "l2kFitArea") as? Bool ?? true // -l2kFitArea 0
         session.pipeline.fitPlayArea = fitPlayArea
+        // -l2kImagesFollow 0: the game's images are always the middle of the camera picture, as before 0.9.2
+        session.pipeline.imagesFollowSkeleton = defaults.object(forKey: "l2kImagesFollow") == nil || defaults.bool(forKey: "l2kImagesFollow")
         session.pipeline.normalize = normalize
         session.pipeline.normalizePlayers = normalizePlayers
         session.colorEnabled = sendColor
@@ -153,11 +158,12 @@ final class SensorModel: ObservableObject {
         }
         discovery.onChange = { [weak self] receivers in self?.receivers = receivers }
         discovery.start()
-        previewer.onPreview = { [weak self] image, zoom, skeleton, rate, status, diagnostics, distance, picture in
+        previewer.onPreview = { [weak self] image, zoom, skeleton, rate, status, diagnostics, distance, picture, gameView in
             guard let self else { return }
             let live = self.live
             live.realDistance = distance
             live.pictureSkeleton = picture
+            if live.gameView != gameView { live.gameView = gameView }
             live.preview = image
             if live.shownZoom != zoom { live.shownZoom = zoom }
             live.skeleton = skeleton
@@ -291,7 +297,7 @@ final class SensorModel: ObservableObject {
 /// Turns frames into preview images on the capture queue, at most 15 times per second.
 final class Previewer {
     /// Called on the main queue.
-    var onPreview: ((CGImage?, CGFloat, l2k_skeleton_frame, Double, String, [String], Float?, l2k_skeleton_frame?) -> Void)?
+    var onPreview: ((CGImage?, CGFloat, l2k_skeleton_frame, Double, String, [String], Float?, l2k_skeleton_frame?, L2KGameView) -> Void)?
     var context: CIContext?
     weak var source: L2KSource?
 
@@ -330,7 +336,9 @@ final class Previewer {
         // blanked the preview: it flashed.
         let mode = mode
         let hasPicture = mode == .color ? (frame.color != nil || frame.colorPreview != nil) : (frame.depth != nil || frame.depthPreview != nil)
-        guard hasPicture else { return }
+        // While a receiver takes the colour picture, the frames in between carry that picture too but not the whole
+        // camera view made for this preview: showing them made the preview jump between the two (seen 2026-11-11).
+        guard hasPicture, frame.forLocal else { return }
         // Building the picture must never hold up the capture queue: it happens on its own queue, and a frame
         // that arrives while the previous picture is still being built is not shown.
         lock.lock()
@@ -344,11 +352,15 @@ final class Previewer {
         previewQueue.async { [weak self] in
             var image: CGImage?
             var zoom: CGFloat = 1
+            // The camera's own picture is drawn over with the skeleton as the camera sees it; the images made for the
+            // game are framed on the skeleton that is sent (`L2KGameView`), so that one goes over them.
+            var camerasPicture = false
             switch mode {
             case .color:
                 if let wide = frame.colorPreview {
                     image = context?.createCGImage(wide, from: wide.extent)
                     zoom = CGFloat(frame.colorPreviewZoom)
+                    camerasPicture = true
                 } else if let color = frame.color {
                     image = context?.createCGImage(color, from: color.extent)
                 }
@@ -356,6 +368,7 @@ final class Previewer {
                 // What the sensor reports when it has a depth map; else the image that would be sent (a drawn figure).
                 if let raw = frame.depthPreview {
                     image = Self.rawDepthImage(raw)
+                    camerasPicture = true
                 } else if let depth = frame.depth {
                     image = Self.depthImage(depth)
                 }
@@ -363,14 +376,15 @@ final class Previewer {
             let skeleton = frame.skeleton
             if let image { self?.snapshotIfAsked(image, zoom: zoom, skeleton: skeleton) }
             let distance = frame.realDistance
-            let picture = frame.pictureSkeleton
+            let picture = camerasPicture ? frame.pictureSkeleton : nil
+            let gameView = frame.gameView
             let posted = ProcessInfo.processInfo.systemUptime
             DispatchQueue.main.async {
                 if let self {
                     self.shown += 1
                     self.mainLate = max(self.mainLate, ProcessInfo.processInfo.systemUptime - posted)
                 }
-                self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics, distance, picture)
+                self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics, distance, picture, gameView)
             }
             guard let self else { return }
             self.lock.lock()

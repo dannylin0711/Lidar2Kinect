@@ -350,6 +350,97 @@ final class L2KKitTests: XCTestCase {
         XCTAssertEqual(mounting.compared, 40)
     }
 
+    /// The game's images are framed on the skeleton that is sent.
+    func testGameViewFollowsTheSentSkeleton() throws {
+        // The fit: picture points that are the sent points 1.6 times as spread around another centre.
+        let sent: [SIMD2<Float>] = [SIMD2(160, 40), SIMD2(140, 90), SIMD2(182, 92), SIMD2(150, 200), SIMD2(171, 198), SIMD2(120, 120)]
+        let sentCentre = sent.reduce(SIMD2<Float>(), +) / Float(sent.count)
+        let pictureCentre = SIMD2<Float>(190, 150)
+        let picture = sent.map { pictureCentre + 1.6 * ($0 - sentCentre) }
+        let view = try XCTUnwrap(L2KGameView.fitting(sent: sent, picture: picture))
+        XCTAssertEqual(view.scale, 1.6, accuracy: 1e-4)
+        // every sent pixel p must show the picture pixel centre + scale * (p - centre) + shift
+        for (p, q) in zip(sent, picture) {
+            XCTAssertEqual(160 + view.scale * (p.x - 160) + view.dx * 320, q.x, accuracy: 0.01)
+            XCTAssertEqual(120 + view.scale * (p.y - 120) + view.dy * 240, q.y, accuracy: 0.01)
+        }
+        // The same points: the Kinect's own view. Too few points, or points in one place: no view.
+        XCTAssertTrue(try XCTUnwrap(L2KGameView.fitting(sent: sent, picture: sent)).isIdentity)
+        XCTAssertNil(L2KGameView.fitting(sent: Array(sent.prefix(3)), picture: Array(picture.prefix(3))))
+        XCTAssertNil(L2KGameView.fitting(sent: [SIMD2<Float>](repeating: SIMD2(10, 10), count: 6), picture: picture))
+
+        // The camera that renders the view: the same source position as the plain camera at the scaled, shifted pixel.
+        var camera = l2k_src_camera(fxn: 0.42, fyn: 0.63, cxn: 0.51, cyn: 0.48)
+        for quadrant in 0..<4 {
+            var moved = view.camera(camera, quadrant: Int32(quadrant))
+            for (un, vn) in [(Float(0), Float(0)), (1, 0), (0.3, 0.8), (0.5, 0.5), (1, 1)] {
+                var a: Float = 0, b: Float = 0, c: Float = 0, d: Float = 0
+                l2k_virtual_to_source(&moved, Int32(quadrant), un, vn, &a, &b)
+                l2k_virtual_to_source(&camera, Int32(quadrant), 0.5 + view.scale * (un - 0.5) + view.dx, 0.5 + view.scale * (vn - 0.5) + view.dy, &c, &d)
+                XCTAssertEqual(a, c, accuracy: 1e-5, "quadrant \(quadrant)")
+                XCTAssertEqual(b, d, accuracy: 1e-5, "quadrant \(quadrant)")
+            }
+        }
+
+        // Through the pipeline: a player 1.2 m in front of a level camera, normalised to the game's 2.5 m. The images
+        // have to show more than the Kinect's own view (the player is drawn smaller), and the player mask has to lie
+        // on the skeleton that is sent.
+        let pipeline = L2KPipeline()
+        pipeline.normalize = true
+        var body = l2k_src_body()
+        body.tracking_id = 1
+        let joints: [(Int, SIMD3<Float>)] = [
+            (Int(L2K_SRC_PELVIS), SIMD3(0, -0.1, -1.2)), (Int(L2K_SRC_NECK), SIMD3(0, 0.4, -1.2)), (Int(L2K_SRC_HEAD), SIMD3(0, 0.6, -1.2)),
+            (Int(L2K_SRC_SHOULDER_LEFT), SIMD3(-0.2, 0.4, -1.2)), (Int(L2K_SRC_ELBOW_LEFT), SIMD3(-0.3, 0.15, -1.2)), (Int(L2K_SRC_WRIST_LEFT), SIMD3(-0.32, -0.1, -1.2)),
+            (Int(L2K_SRC_SHOULDER_RIGHT), SIMD3(0.2, 0.4, -1.2)), (Int(L2K_SRC_ELBOW_RIGHT), SIMD3(0.3, 0.15, -1.2)), (Int(L2K_SRC_WRIST_RIGHT), SIMD3(0.32, -0.1, -1.2)),
+            (Int(L2K_SRC_HIP_LEFT), SIMD3(-0.1, -0.15, -1.2)), (Int(L2K_SRC_KNEE_LEFT), SIMD3(-0.1, -0.55, -1.2)), (Int(L2K_SRC_ANKLE_LEFT), SIMD3(-0.1, -0.95, -1.2)),
+            (Int(L2K_SRC_HIP_RIGHT), SIMD3(0.1, -0.15, -1.2)), (Int(L2K_SRC_KNEE_RIGHT), SIMD3(0.1, -0.55, -1.2)), (Int(L2K_SRC_ANKLE_RIGHT), SIMD3(0.1, -0.95, -1.2)),
+        ]
+        for (joint, position) in joints { body.set(joint, position, confidence: 2) }
+        // a wide camera, and a mask that is the player's bounding box in its picture
+        let source = l2k_src_camera(fxn: 0.42, fyn: 0.56, cxn: 0.5, cyn: 0.5)
+        let maskWidth = 200, maskHeight = 150
+        var made: CVPixelBuffer?
+        CVPixelBufferCreate(nil, maskWidth, maskHeight, kCVPixelFormatType_OneComponent8, nil, &made)
+        let mask = try XCTUnwrap(made)
+        CVPixelBufferLockBaseAddress(mask, [])
+        let base = try XCTUnwrap(CVPixelBufferGetBaseAddress(mask)).assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRow(mask)
+        func column(_ x: Float) -> Int { Int((source.cxn + source.fxn * x / 1.2) * Float(maskWidth)) }
+        func row(_ y: Float) -> Int { Int((source.cyn - source.fyn * y / 1.2) * Float(maskHeight)) }
+        for y in 0..<maskHeight {
+            for x in 0..<maskWidth {
+                base[y * stride + x] = (column(-0.4)...column(0.4)).contains(x) && (row(0.75)...row(-1.05)).contains(y) ? 255 : 0
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(mask, [])
+        var frame = L2KFrame(skeleton: l2k_skeleton_frame(), depth: nil, color: nil, quadrant: 0)
+        for step in 0..<20 { // the view is eased in
+            frame = pipeline.process(L2KSourceFrame(timestamp: Double(step) / 30, bodies: [body], upCamera: SIMD3(0, 1, 0), camera: source,
+                                                    depthMap: nil, segmentation: mask, image: nil),
+                                     kind: UInt8(L2K_SOURCE_VISION_3D), wantDepth: true, wantColor: false, playersOnly: false)
+        }
+        let player = try XCTUnwrap(frame.skeleton.trackedSkeletons.first?.skeleton)
+        print(String(format: "L2K-GAMEVIEW player at %.2f m, view scale %.3f shift %.3f %.3f", player.position.z, frame.gameView.scale, frame.gameView.dx, frame.gameView.dy))
+        XCTAssertEqual(player.position.z, 2.5, accuracy: 0.05)
+        XCTAssertEqual(frame.gameView.scale, 2.5 / 1.2, accuracy: 0.12) // the player is reported about twice as far away
+        let depth = try XCTUnwrap(frame.depth)
+        // joints of the sent skeleton are on player pixels; a point beside the body is not
+        for joint in [KinectJoint.head, .hipCenter, .handLeft, .kneeRight] {
+            var u: Float = 0, v: Float = 0
+            XCTAssertEqual(l2k_skeleton_to_depth_pixel(player.position(of: joint), 320, 240, &u, &v), 1)
+            XCTAssertNotEqual(depth[min(239, max(0, Int(v))) * 320 + min(319, max(0, Int(u)))] & UInt16(L2K_PLAYER_INDEX_MASK), 0, "\(joint)")
+        }
+        XCTAssertEqual(depth[120 * 320 + 20] & UInt16(L2K_PLAYER_INDEX_MASK), 0)
+
+        // Switched off: the images are the middle of the camera picture again.
+        pipeline.imagesFollowSkeleton = false
+        frame = pipeline.process(L2KSourceFrame(timestamp: 1, bodies: [body], upCamera: SIMD3(0, 1, 0), camera: source,
+                                                depthMap: nil, segmentation: mask, image: nil),
+                                 kind: UInt8(L2K_SOURCE_VISION_3D), wantDepth: true, wantColor: false, playersOnly: false)
+        XCTAssertTrue(frame.gameView.isIdentity)
+    }
+
     /// The picture for Vision: its two fixed sizes, and where the camera image sits in it.
     func testVisionCanvasLayout() {
         // 4:3 camera, device upright in landscape: a wide picture, the image as high as the picture.

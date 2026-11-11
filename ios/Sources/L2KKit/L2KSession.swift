@@ -105,13 +105,14 @@ public final class L2KSession {
         // Images only the local consumer wants (a preview) are made at the local rate, not for every frame.
         let localDue = sourceFrame.timestamp - lastLocal >= (1 / localRate) * 0.9
         if localDue { lastLocal = sourceFrame.timestamp }
-        let frame = pipeline.process(sourceFrame, kind: source.kind,
+        var frame = pipeline.process(sourceFrame, kind: source.kind,
                                      wantDepth: sendDepth || (localWantsDepth && localDue),
                                      wantColor: sendColor || (localWantsColor && localDue),
                                      playersOnly: wanted.depthMode == UInt8(L2K_DEPTH_MODE_PLAYERS),
                                      wantDepthPreview: localWantsDepthPreview && localDue,
                                      colorPreviewZoom: (localWantsColor && localDue) ? localColorPreviewZoom : 1,
                                      colorPreviewFit: localWantsColor && localDue && localColorPreviewFitsCamera)
+        frame.forLocal = localDue
         if wanted.streams != 0 {
             var jpeg: Data?
             if sendColor, let color = frame.color {

@@ -219,7 +219,8 @@ private struct LivePreview: View {
     let depth: Bool
 
     var body: some View {
-        SensorPreview(image: live.preview, skeleton: live.skeleton, zoom: live.shownZoom, pictureSkeleton: live.pictureSkeleton)
+        SensorPreview(image: live.preview, skeleton: live.skeleton, zoom: live.shownZoom, pictureSkeleton: live.pictureSkeleton,
+                      gameView: live.gameView)
         Text(depth
              ? "Depth: bright = near, blue = outside the Kinect's 0.8–4 m, green = person, black = no reading. Skeleton: orange = your left, blue = your right."
              : "Skeleton: orange = your left side, blue = your right side."

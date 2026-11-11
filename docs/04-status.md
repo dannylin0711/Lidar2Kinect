@@ -26,6 +26,29 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-11 (5) — 0.9.2: the preview jumping, the game's images on the player (Apple side)
+
+Danny sent a screen recording from the iPhone 17 Pro (front camera, landscape, "Best position" on,
+a receiver connected): the preview jumped between the whole camera picture and a close-up several
+times a second, and "the game is not reading a full view of the camera". **No change to `shared/`.**
+
+- **Jumping preview.** While a receiver takes the colour picture every frame carries the Kinect
+  colour image, but only every second one the whole-camera picture made for the preview; the
+  preview showed whichever came. Frames are now marked (`L2KFrame.forLocal`) and the preview only
+  shows the ones made for it.
+- **The game's images.** With the skeleton normalised to 2.5 m and the player standing close to a
+  wide camera, the images sent were still the middle of the camera picture at the Kinect's field of
+  view: a face and chest. They are now framed on the skeleton that is sent (`L2KGameView`, docs/03
+  "Where the images look"); the preview's dashed rectangle shows that part, and the skeleton drawn
+  over a picture made for the game is the sent one.
+- The recording also shows 0.9.1's front camera working in landscape: picture upright, skeleton on
+  the body from head to feet.
+- Verified: `swift test` 19 tests (1 new: the fit, the camera that renders it for the four rolls,
+  and through the pipeline a player at 1.2 m normalised to 2.5 m whose mask lies on the sent
+  skeleton's joints, view scale 2.05); `make -C shared test` 1136 checks; the app builds and is
+  installed on the iPhone and the iPad. **Not verified on a device**: both fixes by eye (Danny to
+  confirm), the picture a receiver gets, two players.
+
 ## 2026-11-11 (4) — 0.9.1: front camera crash, picture a quarter turn off, camera menu (Apple side)
 
 Danny, on the iPhone 17 Pro with 0.9.0: the app crashes when switching to the front camera, "huge

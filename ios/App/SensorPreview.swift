@@ -11,6 +11,8 @@ struct SensorPreview: View {
     /// The skeletons as the camera sees them. The overlay on the picture draws these (the picture shows where the
     /// player really is); the top view draws `skeleton` (what the game is told).
     var pictureSkeleton: l2k_skeleton_frame?
+    /// The part of the camera picture the game's images show (the dashed frame on a zoomed-out picture).
+    var gameView = L2KGameView.identity
 
     private static let slotColors: [Color] = [.green, .cyan, .yellow, .pink, .purple, .mint]
 
@@ -57,9 +59,10 @@ struct SensorPreview: View {
                 context.draw(Image(decorative: image, scale: 1), in: frame)
             }
             if zoom > 1 {
-                // what the Kinect's own image covers
-                let inner = CGRect(x: size.width * (0.5 - 0.5 / zoom), y: size.height * (0.5 - 0.5 / zoom),
-                                   width: size.width / zoom, height: size.height / zoom)
+                // what the images sent to the game cover: the Kinect's own view, moved with the skeleton that is sent
+                let width = size.width * CGFloat(gameView.scale) / zoom, height = size.height * CGFloat(gameView.scale) / zoom
+                let inner = CGRect(x: size.width * (0.5 + CGFloat(gameView.dx) / zoom) - width / 2,
+                                   y: size.height * (0.5 + CGFloat(gameView.dy) / zoom) - height / 2, width: width, height: height)
                 context.stroke(Path(inner), with: .color(.white.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
             }
             guard let skeleton else { return }
