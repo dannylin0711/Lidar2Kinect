@@ -334,12 +334,147 @@ final class L2KKitTests: XCTestCase {
         XCTAssertEqual(mounting.quarterTurns, 0)
         XCTAssertEqual(mounting.compared, 0)
 
+        // What is left to turn when the connection has turned the frames already: the iPhone 17 Pro's front camera in
+        // portrait (level angle 0°, frames turned 270°) needs the same quarter turn as a rear camera (90°, 0°).
+        XCTAssertEqual(L2KCameraView.remainingTurn(levelAngle: 0, applied: 270), 90)
+        XCTAssertEqual(L2KCameraView.remainingTurn(levelAngle: 90, applied: 0), 90)
+        XCTAssertEqual(L2KCameraView.remainingTurn(levelAngle: 90, applied: 90), 0)
+        XCTAssertEqual(L2KCameraView.remainingTurn(levelAngle: 270, applied: 90), 180)
+        XCTAssertEqual(L2KCameraView.quadrant(forLevelAngle: L2KCameraView.remainingTurn(levelAngle: 0, applied: 270)), 3)
+
         // A camera whose mounting is known only counts.
         mounting = L2KCameraMounting(adopts: false)
         for _ in 0..<40 { _ = mounting.correct(up: portrait, levelAngle: 0) }
         XCTAssertEqual(mounting.quarterTurns, 0)
         XCTAssertEqual(mounting.agreed, 0)
         XCTAssertEqual(mounting.compared, 40)
+    }
+
+    /// The picture for Vision: its two fixed sizes, and where the camera image sits in it.
+    func testVisionCanvasLayout() {
+        // 4:3 camera, device upright in landscape: a wide picture, the image as high as the picture.
+        var layout = VisionCanvasLayout(bufferWidth: 1920, bufferHeight: 1440, quadrant: 0)
+        XCTAssertEqual([layout.width, layout.height], [1280, 720])
+        XCTAssertEqual(layout.content, CGRect(x: 160, y: 0, width: 960, height: 720))
+        // The same camera in a portrait device: a tall picture, bars above and below.
+        layout = VisionCanvasLayout(bufferWidth: 1920, bufferHeight: 1440, quadrant: 3)
+        XCTAssertEqual([layout.width, layout.height], [720, 1280])
+        XCTAssertEqual(layout.content, CGRect(x: 0, y: 160, width: 720, height: 960))
+        // A square camera (the iPhone 17 Pro's front camera) never gives Vision a square picture.
+        for quadrant in 0..<4 {
+            layout = VisionCanvasLayout(bufferWidth: 1280, bufferHeight: 1280, quadrant: Int32(quadrant))
+            XCTAssertEqual([layout.width, layout.height], [720, 1280])
+            XCTAssertEqual(layout.content, CGRect(x: 0, y: 280, width: 720, height: 720))
+        }
+        // The 16:9 camera of before 0.9: the picture is the whole image, as Vision saw it then.
+        layout = VisionCanvasLayout(bufferWidth: 1280, bufferHeight: 720, quadrant: 3)
+        XCTAssertEqual(layout.content, CGRect(x: 0, y: 0, width: 720, height: 1280))
+
+        // Picture point <-> buffer point, and the intrinsics: the principal point and the focal length in picture pixels.
+        for quadrant in 0..<4 {
+            layout = VisionCanvasLayout(bufferWidth: 1920, bufferHeight: 1440, quadrant: Int32(quadrant))
+            for (u, v) in [(Float(0.5), Float(0.5)), (0.1, 0.2), (0.9, 0.35), (0.3, 0.95)] {
+                let p = layout.picturePoint(fromBuffer: u, v)
+                let back = layout.bufferPoint(fromVision: CGPoint(x: p.x / CGFloat(layout.width), y: 1 - p.y / CGFloat(layout.height)))
+                XCTAssertEqual(back.u, u, accuracy: 1e-4)
+                XCTAssertEqual(back.v, v, accuracy: 1e-4)
+            }
+            let k = layout.intrinsics(of: l2k_src_camera(fxn: 0.4, fyn: 0.6, cxn: 0.52, cyn: 0.47))
+            let turned = quadrant & 1 == 1
+            XCTAssertEqual(k.columns.0.x, 0.4 * 1920 * Float(layout.scale) * (turned ? 0.6 * 1440 / (0.4 * 1920) : 1), accuracy: 0.01)
+            XCTAssertEqual(k.columns.1.y, 0.6 * 1440 * Float(layout.scale) * (turned ? 0.4 * 1920 / (0.6 * 1440) : 1), accuracy: 0.01)
+            let centre = layout.picturePoint(fromBuffer: 0.52, 0.47)
+            XCTAssertEqual(k.columns.2.x, Float(centre.x), accuracy: 0.01)
+            XCTAssertEqual(k.columns.2.y, Float(centre.y), accuracy: 0.01)
+        }
+    }
+
+    /// The drawn picture agrees with the layout: a mark in the camera buffer lands where `bufferPoint` says it came from,
+    /// for every roll (this ties Core Image's turning of the buffer to the turning Vision's answers are mapped back with).
+    func testVisionCanvasDrawsWhereTheLayoutSays() throws {
+        let width = 400, height = 300
+        var made: CVPixelBuffer?
+        CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary, &made)
+        let buffer = try XCTUnwrap(made)
+        let markX = 90, markY = 60, half = 6 // a white square away from every symmetry
+        CVPixelBufferLockBaseAddress(buffer, [])
+        let base = try XCTUnwrap(CVPixelBufferGetBaseAddress(buffer)).assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        for y in 0..<height {
+            for x in 0..<width {
+                let white = abs(x - markX) <= half && abs(y - markY) <= half
+                for c in 0..<4 { base[y * stride + x * 4 + c] = c == 3 ? 255 : (white ? 255 : 0) }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        let canvas = VisionCanvas()
+        for quadrant in 0..<4 {
+            let (picture, layout) = try XCTUnwrap(canvas.draw(buffer, quadrant: Int32(quadrant)))
+            XCTAssertEqual(CVPixelBufferGetWidth(picture), layout.width)
+            XCTAssertEqual(CVPixelBufferGetHeight(picture), layout.height)
+            CVPixelBufferLockBaseAddress(picture, .readOnly)
+            let pixels = try XCTUnwrap(CVPixelBufferGetBaseAddress(picture)).assumingMemoryBound(to: UInt8.self)
+            let rowBytes = CVPixelBufferGetBytesPerRow(picture)
+            var sumX = 0.0, sumY = 0.0, weight = 0.0
+            for y in 0..<layout.height {
+                for x in 0..<layout.width {
+                    let value = Double(pixels[y * rowBytes + x * 4 + 1])
+                    sumX += value * (Double(x) + 0.5)
+                    sumY += value * (Double(y) + 0.5)
+                    weight += value
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(picture, .readOnly)
+            XCTAssertGreaterThan(weight, 0, "quadrant \(quadrant): the mark is not in the picture")
+            let found = layout.bufferPoint(fromVision: CGPoint(x: sumX / weight / Double(layout.width), y: 1 - sumY / weight / Double(layout.height)))
+            XCTAssertEqual(found.u, (Float(markX) + 0.5) / Float(width), accuracy: 0.005, "quadrant \(quadrant)")
+            XCTAssertEqual(found.v, (Float(markY) + 0.5) / Float(height), accuracy: 0.005, "quadrant \(quadrant)")
+        }
+    }
+
+    /// With a picture of a person (L2K_TEST_IMAGE): the camera detector survives the device being turned between
+    /// portrait and landscape and a square camera, and Vision works with the focal length it is given.
+    func testCameraDetectorOnAPictureThroughTurnsAndFormats() throws {
+        guard let path = ProcessInfo.processInfo.environment["L2K_TEST_IMAGE"] else { throw XCTSkip("no L2K_TEST_IMAGE") }
+        let image = try XCTUnwrap(CIImage(contentsOf: URL(fileURLWithPath: path)))
+        let context = CIContext()
+        // The picture as a camera of `width` × `height` would deliver it in a device rolled by `quadrant`.
+        func cameraBuffer(_ width: Int, _ height: Int, quadrant: Int32) throws -> CVPixelBuffer {
+            var made: CVPixelBuffer?
+            CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary, &made)
+            let buffer = try XCTUnwrap(made)
+            let turned = quadrant & 1 == 1
+            let uw = CGFloat(turned ? height : width), uh = CGFloat(turned ? width : height)
+            let scale = min(uw / image.extent.width, uh / image.extent.height)
+            var upright = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            upright = upright.transformed(by: CGAffineTransform(translationX: (uw - upright.extent.width) / 2 - upright.extent.minX,
+                                                                y: (uh - upright.extent.height) / 2 - upright.extent.minY))
+            upright = upright.composited(over: CIImage(color: .gray)).cropped(to: CGRect(x: 0, y: 0, width: uw, height: uh))
+            let back: CGImagePropertyOrientation = [.up, .right, .down, .left][Int(quadrant & 3)] // undoes orientation(forQuadrant:)
+            var sensor = upright.oriented(back)
+            sensor = sensor.transformed(by: CGAffineTransform(translationX: -sensor.extent.minX, y: -sensor.extent.minY))
+            context.render(sensor, to: buffer)
+            return buffer
+        }
+        let detector = VisionHybridDetector()
+        // (camera size, roll): the old 16:9 format, the 4:3 one, the square front camera; turned back and forth.
+        let steps: [(Int, Int, Int32)] = [(1280, 720, 3), (1280, 720, 0), (1920, 1440, 3), (1920, 1440, 0), (1920, 1440, 1),
+                                          (1280, 1280, 3), (1280, 1280, 0), (1920, 1440, 3)]
+        var depths: [Float] = []
+        for (width, height, quadrant) in steps {
+            // a camera whose long side sees 100 degrees
+            let focal = Float(max(width, height)) / 2 / tan(50 * .pi / 180)
+            let camera = l2k_src_camera(fxn: focal / Float(width), fyn: focal / Float(height), cxn: 0.5, cyn: 0.5)
+            let joints = detector.detect(in: try cameraBuffer(width, height, quadrant: quadrant), quadrant: quadrant, camera: camera)
+            let root = joints.first { $0.source == Int(L2K_SRC_PELVIS) }
+            print(String(format: "L2K-VISION camera %d×%d roll %d: %d joints, root %.2f m, focal given %.0f px, used %.0f px, error %@",
+                         width, height, quadrant, joints.count, root?.depth ?? 0, detector.lastFocalGiven, detector.lastFocalUsed ?? 0, detector.lastError ?? "none"))
+            XCTAssertNil(detector.lastError)
+            XCTAssertFalse(joints.isEmpty, "\(width)×\(height) roll \(quadrant)")
+            if let used = detector.lastFocalUsed { XCTAssertEqual(used, detector.lastFocalGiven, accuracy: detector.lastFocalGiven * 0.05) }
+            if let root { depths.append(root.depth) }
+        }
+        print("L2K-VISION root depths: " + depths.map { String(format: "%.2f", $0) }.joined(separator: " "))
     }
 
     /// Runs Vision's body pose on a picture if one is given (L2K_TEST_IMAGE=/path/to.png) and prints what it finds.

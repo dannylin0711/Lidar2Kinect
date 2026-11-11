@@ -78,6 +78,13 @@ public enum L2KCameraView {
         return (4 - turns) & 3
     }
 
+    /// The angle (degrees clockwise, 0 ..< 360) by which frames still have to be turned for a level horizon, when the
+    /// system's level angle is `levelAngle` and the capture connection has already turned them by `applied`.
+    public static func remainingTurn(levelAngle: Float, applied: Float) -> Float {
+        let turn = (levelAngle - applied).truncatingRemainder(dividingBy: 360)
+        return turn < 0 ? turn + 360 : turn
+    }
+
     /// `up` with its in-image part turned by `quarterTurns` quarter turns (the part along the optical axis is kept).
     static func turned(_ up: SIMD3<Float>, quarterTurns: Int32) -> SIMD3<Float> {
         switch quarterTurns & 3 {

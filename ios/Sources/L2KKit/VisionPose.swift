@@ -81,10 +81,16 @@ final class VisionBodyDetector {
     }
 
     func person(from observation: VNHumanBodyPoseObservation, quadrant: Int32) -> VisionPerson? {
+        person(from: observation) { VisionOrientation.bufferPoint(fromVision: $0, quadrant: quadrant) }
+    }
+
+    /// `bufferPoint` turns a Vision point (normalised in the picture Vision was given, origin bottom-left) into a
+    /// camera buffer position (normalised, origin top-left).
+    func person(from observation: VNHumanBodyPoseObservation, bufferPoint: (CGPoint) -> (u: Float, v: Float)) -> VisionPerson? {
         guard let points = try? observation.recognizedPoints(.all) else { return nil }
         func position(_ name: VNHumanBodyPoseObservation.JointName) -> SIMD2<Float>? {
             guard let p = points[name], p.confidence >= minimumConfidence else { return nil }
-            let b = VisionOrientation.bufferPoint(fromVision: p.location, quadrant: quadrant)
+            let b = bufferPoint(p.location)
             return SIMD2(b.u, b.v)
         }
         var joints: [DepthLiftJoint] = []
@@ -155,16 +161,45 @@ final class VisionBody3DDetector {
     }
 
     static func joints(of observation: VNHumanBodyPose3DObservation, quadrant: Int32) -> [VisionJoint3D] {
+        joints(of: observation) { VisionOrientation.bufferPoint(fromVision: $0, quadrant: quadrant) }
+    }
+
+    /// `bufferPoint`: see `VisionBodyDetector.person(from:bufferPoint:)`.
+    static func joints(of observation: VNHumanBodyPose3DObservation, bufferPoint: (CGPoint) -> (u: Float, v: Float)) -> [VisionJoint3D] {
         var joints: [VisionJoint3D] = []
         for (name, source) in Self.map {
             guard let point = try? observation.pointInImage(name),
                   let position = try? observation.cameraRelativePosition(name) else { continue }
             let depth = abs(position.columns.3.z)
             guard depth.isFinite, depth > 0.05 else { continue }
-            let b = VisionOrientation.bufferPoint(fromVision: point.location, quadrant: quadrant)
+            let b = bufferPoint(point.location)
             joints.append(VisionJoint3D(source: source, u: b.u, v: b.v, depth: depth))
         }
         return joints
+    }
+
+    /// The focal length (pixels of a picture `height` pixels high) of the camera Vision placed the body with: the
+    /// slope of the joints' heights in the picture against their height / distance in space. nil when the body does
+    /// not span enough of the picture to tell. For checking that Vision used the intrinsics it was given.
+    static func focalLength(of observation: VNHumanBodyPose3DObservation, pictureHeight height: Float) -> Float? {
+        var xs: [Float] = [], ys: [Float] = []
+        for name in observation.availableJointNames {
+            guard let point = try? observation.pointInImage(name),
+                  let position = try? observation.cameraRelativePosition(name) else { continue }
+            let p = position.columns.3
+            guard abs(p.z) > 0.05 else { continue }
+            xs.append(p.y / p.z)
+            ys.append(Float(point.location.y) * height)
+        }
+        guard xs.count >= 6 else { return nil }
+        let n = Float(xs.count), mx = xs.reduce(0, +) / n, my = ys.reduce(0, +) / n
+        var sxy: Float = 0, sxx: Float = 0
+        for i in xs.indices {
+            sxy += (xs[i] - mx) * (ys[i] - my)
+            sxx += (xs[i] - mx) * (xs[i] - mx)
+        }
+        guard sxx > 0.01 else { return nil }
+        return abs(sxy / sxx)
     }
 
     /// Place the joints in source camera space (+x image right, +y image up, the camera looks along -z).
@@ -248,9 +283,19 @@ enum VisionKinematics {
 /// - seen on an iPhone 17 Pro, 2026-11-10). A joint the 2D detector does not see is taken from the 3D model and
 /// reported as estimated.
 final class VisionHybridDetector {
-    private let request2D = VNDetectHumanBodyPoseRequest()
-    private let request3D = VNDetectHumanBodyPose3DRequest()
+    private var request2D = VNDetectHumanBodyPoseRequest()
+    private var request3D = VNDetectHumanBodyPose3DRequest()
     private let detector2D = VisionBodyDetector()
+    private let canvas = VisionCanvas()
+    private var wide: Bool?
+    /// Give Vision the camera's intrinsics (true distances). Off: Vision assumes its own camera, as before 0.9.1.
+    var givesIntrinsics = true
+    /// The picture Vision was last given, and - when a body was found - the focal length it worked with against the
+    /// one it was given (pixels).
+    private(set) var lastLayout: VisionCanvasLayout?
+    private(set) var lastFocalUsed: Float?, lastFocalGiven: Float = 0
+    /// How long drawing the picture took (milliseconds).
+    private(set) var lastDrawMs = 0.0
     private(set) var lastError: String?
     private(set) var lastHeight: Float = 0
     private(set) var lastHeightMeasured = false
@@ -274,7 +319,29 @@ final class VisionHybridDetector {
     private var boneLengths: [Int: Float] = [:]
 
     func detect(in image: CVPixelBuffer, quadrant: Int32, camera: l2k_src_camera) -> [VisionJoint3D] {
-        let handler = VNImageRequestHandler(cvPixelBuffer: image, orientation: VisionOrientation.orientation(forQuadrant: quadrant), options: [:])
+        // Vision sees an upright picture of a fixed size, never the camera buffer (see VisionCanvas.swift).
+        let drawStart = ProcessInfo.processInfo.systemUptime
+        guard let (picture, layout) = canvas.draw(image, quadrant: quadrant) else {
+            lastError = "the picture for Vision could not be made"
+            return []
+        }
+        lastDrawMs = (ProcessInfo.processInfo.systemUptime - drawStart) * 1000
+        lastLayout = layout
+        if wide != layout.isWide {
+            // A request keeps the shape of the first picture it saw: a new shape needs new requests.
+            if wide != nil {
+                request2D = VNDetectHumanBodyPoseRequest()
+                request3D = VNDetectHumanBodyPose3DRequest()
+            }
+            wide = layout.isWide
+        }
+        var options: [VNImageOption: Any] = [:]
+        var k = layout.intrinsics(of: camera)
+        lastFocalGiven = k.columns.1.y
+        if givesIntrinsics {
+            options[.cameraIntrinsics] = Data(bytes: &k, count: MemoryLayout<matrix_float3x3>.size) as CFData
+        }
+        let handler = VNImageRequestHandler(cvPixelBuffer: picture, orientation: .up, options: options)
         do {
             try handler.perform([request2D, request3D])
             lastError = nil
@@ -282,16 +349,18 @@ final class VisionHybridDetector {
             lastError = error.localizedDescription
             return []
         }
+        lastFocalUsed = nil
         guard let observation = request3D.results?.first else { return [] }
         lastHeight = observation.bodyHeight
         lastHeightMeasured = observation.heightEstimation == .measured
-        let model = VisionBody3DDetector.joints(of: observation, quadrant: quadrant)
+        lastFocalUsed = VisionBody3DDetector.focalLength(of: observation, pictureHeight: Float(layout.height))
+        let model = VisionBody3DDetector.joints(of: observation, bufferPoint: layout.bufferPoint(fromVision:))
         guard !model.isEmpty else { return [] }
         let depth = Dictionary(uniqueKeysWithValues: model.map { ($0.source, $0.depth) })
         let modelRoot = model.first { $0.source == Int(L2K_SRC_PELVIS) } ?? model[0]
 
         // The 2D person that is the 3D request's person: the one whose centre is nearest to the model's root.
-        let people = (request2D.results ?? []).compactMap { detector2D.person(from: $0, quadrant: quadrant) }
+        let people = (request2D.results ?? []).compactMap { detector2D.person(from: $0, bufferPoint: layout.bufferPoint(fromVision:)) }
         let person = people.min { simd_distance($0.centre, SIMD2(modelRoot.u, modelRoot.v)) < simd_distance($1.centre, SIMD2(modelRoot.u, modelRoot.v)) }
         var joints: [VisionJoint3D] = []
         var seen = Set<Int>()

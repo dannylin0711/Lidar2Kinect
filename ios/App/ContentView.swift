@@ -28,12 +28,7 @@ struct ContentView: View {
 
     private var previewColumn: some View {
         VStack(spacing: 8) {
-            SensorPreview(image: model.preview, skeleton: model.skeleton, zoom: model.shownZoom, pictureSkeleton: model.pictureSkeleton)
-            Text(model.previewMode == .depth
-                 ? "Depth: bright = near, blue = outside the Kinect's 0.8–4 m, green = person, black = no reading. Skeleton: orange = your left, blue = your right."
-                 : "Skeleton: orange = your left side, blue = your right side."
-                    + (model.shownZoom > 1 ? " The picture is everything the camera sees; the dashed frame is what the game's Kinect image shows." : ""))
-                .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+            LivePreview(live: model.live, depth: model.previewMode == .depth)
             Picker("Preview", selection: $model.previewMode) {
                 ForEach(SensorModel.PreviewMode.allCases) { Text($0.title).tag($0) }
             }
@@ -45,49 +40,10 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             sensorCard
             receiverCard
-            if !model.diagnostics.isEmpty { diagnosticsCard }
+            LiveDiagnostics(live: model.live, model: model)
             if !model.deviceSupport.isEmpty { supportCard }
             Text("Lidar2Kinect \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")")
                 .font(.caption2).foregroundStyle(.tertiary)
-        }
-    }
-
-    // MARK: - live diagnostics
-
-    /// What the sensors deliver right now. "Copy" puts all of it, with the device support list, on the clipboard.
-    private var diagnosticsCard: some View {
-        Card(title: "Live diagnostics") {
-            ForEach(model.diagnostics, id: \.self) { line in
-                Text(line).font(.caption).monospacedDigit().foregroundStyle(.secondary)
-            }
-            Button("Copy diagnostics") {
-                var lines = ["Lidar2Kinect \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") on \(UIDevice.current.name)",
-                             "Source: \(model.sourceChoice.title)\(model.upperBodyOnly ? ", upper body only" : "")",
-                             "Status: \(model.sourceStatus)"]
-                lines += model.diagnostics
-                lines += model.deviceSupport.map { "\($0.supported ? "yes" : "no ")  \($0.label)" }
-                UIPasteboard.general.string = lines.joined(separator: "\n")
-            }
-            .font(.footnote)
-            Divider()
-            HStack {
-                Button("Record 10 s") { model.record() }
-                    .font(.footnote)
-                    .disabled({ if case .recording = model.recording { return true } else { return false } }())
-                Spacer()
-                Text(recordingText).font(.footnote).foregroundStyle(.secondary)
-            }
-            Text("Saves ten seconds of the camera to this app's files, to test the body tracking against it on the Mac.")
-                .font(.caption2).foregroundStyle(.tertiary)
-        }
-    }
-
-    private var recordingText: String {
-        switch model.recording {
-        case .idle: return ""
-        case .recording(let left): return "Recording, \(left) s left"
-        case .saved(let name): return "Saved \(name)"
-        case .failed(let reason): return reason
         }
     }
 
@@ -112,14 +68,8 @@ struct ContentView: View {
     private var sensorCard: some View {
         Card(title: "Sensor") {
             if model.cameraAvailable {
-                HStack {
-                    Text("Camera")
-                    Spacer()
-                    Picker("Camera", selection: Binding(get: { model.sourceChoice }, set: { model.selectSource($0) })) {
-                        ForEach(model.availableSources) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.menu)
-                }
+                CameraMenu(sources: model.availableSources, choice: model.sourceChoice) { model.selectSource($0) }
+                    .equatable()
                 if model.sourceChoice == .front {
                     Text("The camera on the screen's side, for playing in front of this device. No depth sensor: distances are estimated from the picture.")
                         .font(.footnote).foregroundStyle(.secondary)
@@ -163,28 +113,7 @@ struct ContentView: View {
             if let error = model.sourceError {
                 Text(error).font(.footnote).foregroundStyle(.red)
             }
-            Text(model.sourceStatus).font(.footnote).foregroundStyle(.secondary)
-            if let skeleton = model.skeleton {
-                let tracked = skeleton.trackedSkeletons.count
-                Row("Output", String(format: "%.0f fps", model.frameRate))
-                Row("Bodies tracked", "\(tracked)")
-                Row("Tilt", String(format: "%+.0f°", skeleton.elevationDegrees.rounded() + 0)) // + 0 turns -0 into 0
-                Row("Height above floor", skeleton.flags & UInt32(L2K_FRAME_FLOOR_VALID) != 0
-                    ? String(format: "%.2f m", skeleton.floor_plane.w) : "not known yet")
-                if let body = skeleton.trackedSkeletons.first?.skeleton {
-                    let real = model.realDistance ?? body.position.z
-                    Row("Distance", String(format: "%.2f m", real))
-                    if model.normalize {
-                        Text(String(format: "Reported to the game at %.2f m.", body.position.z))
-                            .font(.footnote).foregroundStyle(.secondary)
-                    } else if real < L2KPipeline.playAreaNear || real > L2KPipeline.playAreaFar {
-                        Text(model.fitPlayArea
-                             ? String(format: "The game only takes a player 1.8–3.2 m away. You are reported to it at %.2f m.", body.position.z)
-                             : "The game only takes a player 1.8–3.2 m away: it will not pick you up here.")
-                            .font(.footnote).foregroundStyle(model.fitPlayArea ? Color.secondary : Color.orange)
-                    }
-                }
-            }
+            LiveReadings(live: model.live, normalize: model.normalize, fitPlayArea: model.fitPlayArea)
         }
     }
 
@@ -260,6 +189,118 @@ struct ContentView: View {
         if streams & L2K.streamDepth != 0 { names.append("depth") }
         if streams & L2K.streamColor != 0 { names.append("colour") }
         return names.isEmpty ? "nothing" : names.joined(separator: ", ")
+    }
+}
+
+/// The camera choice. Equatable, and used with `.equatable()`: it is only rebuilt when the choice or the list changes,
+/// so its menu stays as it is while the rest of the page is redrawn.
+private struct CameraMenu: View, Equatable {
+    let sources: [SensorModel.SourceChoice]
+    let choice: SensorModel.SourceChoice
+    let select: (SensorModel.SourceChoice) -> Void
+
+    nonisolated static func == (a: CameraMenu, b: CameraMenu) -> Bool { a.sources == b.sources && a.choice == b.choice }
+
+    var body: some View {
+        HStack {
+            Text("Camera")
+            Spacer()
+            Picker("Camera", selection: Binding(get: { choice }, set: { select($0) })) {
+                ForEach(sources) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.menu)
+        }
+    }
+}
+
+/// The preview picture with its caption: redrawn with every picture.
+private struct LivePreview: View {
+    @ObservedObject var live: LiveState
+    let depth: Bool
+
+    var body: some View {
+        SensorPreview(image: live.preview, skeleton: live.skeleton, zoom: live.shownZoom, pictureSkeleton: live.pictureSkeleton)
+        Text(depth
+             ? "Depth: bright = near, blue = outside the Kinect's 0.8–4 m, green = person, black = no reading. Skeleton: orange = your left, blue = your right."
+             : "Skeleton: orange = your left side, blue = your right side."
+                + (live.shownZoom > 1 ? " The picture is everything the camera sees; the dashed frame is what the game's Kinect image shows." : ""))
+            .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The source's status and what it measures right now: redrawn with every picture.
+private struct LiveReadings: View {
+    @ObservedObject var live: LiveState
+    let normalize: Bool
+    let fitPlayArea: Bool
+
+    var body: some View {
+        Text(live.sourceStatus).font(.footnote).foregroundStyle(.secondary)
+        if let skeleton = live.skeleton {
+            let tracked = skeleton.trackedSkeletons.count
+            Row("Output", String(format: "%.0f fps", live.frameRate))
+            Row("Bodies tracked", "\(tracked)")
+            Row("Tilt", String(format: "%+.0f°", skeleton.elevationDegrees.rounded() + 0)) // + 0 turns -0 into 0
+            Row("Height above floor", skeleton.flags & UInt32(L2K_FRAME_FLOOR_VALID) != 0
+                ? String(format: "%.2f m", skeleton.floor_plane.w) : "not known yet")
+            if let body = skeleton.trackedSkeletons.first?.skeleton {
+                let real = live.realDistance ?? body.position.z
+                Row("Distance", String(format: "%.2f m", real))
+                if normalize {
+                    Text(String(format: "Reported to the game at %.2f m.", body.position.z))
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else if real < L2KPipeline.playAreaNear || real > L2KPipeline.playAreaFar {
+                    Text(fitPlayArea
+                         ? String(format: "The game only takes a player 1.8–3.2 m away. You are reported to it at %.2f m.", body.position.z)
+                         : "The game only takes a player 1.8–3.2 m away: it will not pick you up here.")
+                        .font(.footnote).foregroundStyle(fitPlayArea ? Color.secondary : Color.orange)
+                }
+            }
+        }
+    }
+}
+
+/// What the sensors deliver right now. "Copy" puts all of it, with the device support list, on the clipboard.
+private struct LiveDiagnostics: View {
+    @ObservedObject var live: LiveState
+    @ObservedObject var model: SensorModel
+
+    var body: some View {
+        if !live.diagnostics.isEmpty {
+            Card(title: "Live diagnostics") {
+                ForEach(live.diagnostics, id: \.self) { line in
+                    Text(line).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                }
+                Button("Copy diagnostics") {
+                    var lines = ["Lidar2Kinect \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") on \(UIDevice.current.name)",
+                                 "Source: \(model.sourceChoice.title)\(model.upperBodyOnly ? ", upper body only" : "")",
+                                 "Status: \(live.sourceStatus)"]
+                    lines += live.diagnostics
+                    lines += model.deviceSupport.map { "\($0.supported ? "yes" : "no ")  \($0.label)" }
+                    UIPasteboard.general.string = lines.joined(separator: "\n")
+                }
+                .font(.footnote)
+                Divider()
+                HStack {
+                    Button("Record 10 s") { model.record() }
+                        .font(.footnote)
+                        .disabled({ if case .recording = model.recording { return true } else { return false } }())
+                    Spacer()
+                    Text(recordingText).font(.footnote).foregroundStyle(.secondary)
+                }
+                Text("Saves ten seconds of the camera to this app's files, to test the body tracking against it on the Mac.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var recordingText: String {
+        switch model.recording {
+        case .idle: return ""
+        case .recording(let left): return "Recording, \(left) s left"
+        case .saved(let name): return "Saved \(name)"
+        case .failed(let reason): return reason
+        }
     }
 }
 

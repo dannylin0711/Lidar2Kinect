@@ -26,6 +26,45 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-11 (4) — 0.9.1: front camera crash, picture a quarter turn off, camera menu (Apple side)
+
+Danny, on the iPhone 17 Pro with 0.9.0: the app crashes when switching to the front camera, "huge
+performance lag", later "I can't select any other options", and the front picture turned 90° to
+the right in portrait and landscape. **No change to `shared/`.**
+
+- **Crash.** Crash log: EXC_BAD_ACCESS in `padImage` (AltruisticBodyPoseKit) under
+  `VNHumanBodyPose3DDetector` — Vision's own code, on the front camera's square 1280×1280 format,
+  once a body is in view. The app remembers the camera, so it then crashed at every start. Vision
+  now gets a fixed upright 720×1280 / 1280×720 picture with the camera's intrinsics (`VisionCanvas`;
+  docs/03 "The picture Vision gets"), new requests when the shape changes, and a steady roll.
+- **Picture a quarter turn off.** The mounting check compared against the system's level angle
+  alone; the capture connection had already turned the frames by 270° (docs/03 "Front camera").
+  Now the difference is used (`L2KCameraView.remainingTurn`).
+- **Camera menu.** Every picture republished the whole app state, so the page was redrawn 15 times
+  a second with the menu in it. In the simulator (camera choices listed with `-l2kFakeSources 1`)
+  the menu opened but a tap on a choice did nothing. The per-picture state is now its own object
+  (`LiveState`) observed only by the preview, the readings and the diagnostics card, and the menu
+  is an equatable view.
+- **Lag.** Not reproduced: with nobody in view the ultra-wide (1920×1440 and 1280×720) and the
+  front camera all ran at 30 fps with 21–23 ms of work per frame, 15 preview pictures a second and
+  the main queue idle; with a body in front of the front camera the same. The page being redrawn
+  15 times a second (above) is the one thing found that could be felt as lag. New diagnostics:
+  "Timing: picture … ms old on arrival, … ms of work per frame, device cool/warm/hot" and, with
+  `-l2kLog 1`, "Screen: … pictures per second, the main queue up to … ms behind".
+- New switches: `-l2kFormat 1280x720` (force a capture format), `-l2kVisionCamera 0` (no intrinsics
+  for Vision), `-l2kFakeSources 1` (simulator only).
+- Verified: `swift test` 18 tests (3 new: the picture's layout and intrinsics, the drawn picture
+  against the layout for the four rolls, the camera detector through turns and formats on a
+  picture with `L2K_TEST_IMAGE`); `make -C shared test` 1136 checks. **On the iPhone 17 Pro**
+  (`-l2kLog 1` over `devicectl`): formats chosen 1920×1440 (rear) and 1280×1280 (front), 30 fps;
+  front camera with a body in view: no crash, 15 joints, "Camera mounting: as assumed; roll agrees
+  with the system in 99 of 103 checks (level angle 0°, frames already turned 270°)".
+- **Not verified:** the menu on a device (no way to tap from the Mac: Xcode's device interaction
+  offers simulators only; Danny to confirm); the front picture's direction by eye; that Vision on
+  iOS uses the intrinsics (385 px against 494 px given in the one close-up reading); distances
+  against a tape measure; the turn between portrait and landscape with a body in view; the iPad.
+  Log sessions started with `devicectl … launch --console` end the app when the console is closed.
+
 ## 2026-11-11 (3) — the camera's whole view, front camera (Apple side)
 
 Danny: "Make ultrawide detect in full view, add the front camera option." **No change to `shared/`**

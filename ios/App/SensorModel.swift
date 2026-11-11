@@ -5,8 +5,29 @@ import L2KKit
 import L2KShared
 import SwiftUI
 
+/// What changes with every picture: the preview, the skeleton, the status lines. Kept apart from `SensorModel` so that
+/// only the views showing these are redrawn 15 times a second. With everything in one object the whole page was
+/// redrawn at that rate, and the camera menu, rebuilt under the finger, did not take a choice.
+@MainActor
+final class LiveState: ObservableObject {
+    @Published var preview: CGImage?
+    @Published var skeleton: l2k_skeleton_frame?
+    /// The skeletons as the camera sees them (before the fit / the normalising), for drawing over the picture.
+    @Published var pictureSkeleton: l2k_skeleton_frame?
+    /// The zoom of the picture currently shown (the depth preview is never zoomed).
+    @Published var shownZoom: CGFloat = 1
+    @Published var frameRate: Double = 0
+    @Published var sourceStatus = "Not started"
+    @Published var diagnostics: [String] = []
+    /// Where the player really stands (metres from the sensor), before the play-area fit.
+    @Published var realDistance: Float?
+}
+
 @MainActor
 final class SensorModel: ObservableObject {
+    /// The per-picture state (see `LiveState`).
+    let live = LiveState()
+
     enum SourceChoice: String, CaseIterable, Identifiable {
         case lidar, ultrawide, front, arkit, synthetic
         var id: String { rawValue }
@@ -47,10 +68,6 @@ final class SensorModel: ObservableObject {
             session.pipeline.fitPlayArea = fitPlayArea
         }
     }
-    /// Where the player really stands (metres from the sensor), before the play-area fit.
-    @Published var realDistance: Float?
-    /// The skeletons as the camera sees them (before the fit / the normalising), for drawing over the picture.
-    @Published var pictureSkeleton: l2k_skeleton_frame?
     @Published var normalize: Bool {
         didSet {
             UserDefaults.standard.set(normalize, forKey: "l2kNormalize")
@@ -69,18 +86,11 @@ final class SensorModel: ObservableObject {
             session.pipeline.keepIdentity = keepPlayer
         }
     }
-    @Published var sourceStatus = "Not started"
     @Published var sourceError: String?
     @Published var senderStatus = L2KSender.Status()
     @Published var receivers: [L2KDiscovery.Receiver] = []
-    @Published var preview: CGImage?
-    @Published var skeleton: l2k_skeleton_frame?
-    @Published var frameRate: Double = 0
     /// The colour preview shows the camera's whole view, not only the part the Kinect's image covers.
     private var showsWholeCamera = false
-    /// The zoom of the picture currently shown (the depth preview is never zoomed).
-    @Published var shownZoom: CGFloat = 1
-    @Published var diagnostics: [String] = []
     @Published var recording: L2KRecorder.State = .idle
     @Published var host: String { didSet { UserDefaults.standard.set(host, forKey: "l2kHost") } }
     @Published var port: String { didSet { UserDefaults.standard.set(port, forKey: "l2kPort") } }
@@ -101,6 +111,8 @@ final class SensorModel: ObservableObject {
         var sources: [SourceChoice] = []
         #if targetEnvironment(simulator)
         deviceSupport = []
+        // -l2kFakeSources 1: list the camera choices (each runs the test figure), to try the controls in the simulator.
+        if defaults.bool(forKey: "l2kFakeSources") { sources = [.lidar, .ultrawide, .front, .arkit] }
         #else
         if VisionDepthSource.isSupported { sources.append(.lidar) }
         if UltraWideSource.isSupported { sources.append(.ultrawide) }
@@ -143,14 +155,15 @@ final class SensorModel: ObservableObject {
         discovery.start()
         previewer.onPreview = { [weak self] image, zoom, skeleton, rate, status, diagnostics, distance, picture in
             guard let self else { return }
-            self.realDistance = distance
-            self.pictureSkeleton = picture
-            self.preview = image
-            self.shownZoom = zoom
-            self.skeleton = skeleton
-            self.frameRate = rate
-            self.sourceStatus = status
-            self.diagnostics = diagnostics
+            let live = self.live
+            live.realDistance = distance
+            live.pictureSkeleton = picture
+            live.preview = image
+            if live.shownZoom != zoom { live.shownZoom = zoom }
+            live.skeleton = skeleton
+            if live.frameRate != rate { live.frameRate = rate }
+            if live.sourceStatus != status { live.sourceStatus = status }
+            if live.diagnostics != diagnostics { live.diagnostics = diagnostics }
             self.logIfAsked(skeleton: skeleton, rate: rate)
         }
         applyPreviewMode()
@@ -179,14 +192,18 @@ final class SensorModel: ObservableObject {
         guard UserDefaults.standard.bool(forKey: "l2kLog") else { return }
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastLog >= 2 else { return }
+        let screen = previewer.takeScreenStats()
+        let screenLine = String(format: "L2K-LOG   Screen: %.0f pictures per second, the main queue up to %.0f ms behind",
+                                lastLog > 0 ? Double(screen.shown) / (now - lastLog) : 0, screen.late * 1000)
         lastLog = now
-        var lines = ["L2K-LOG source=\(sourceChoice.rawValue) upper=\(upperBodyOnly) out=\(String(format: "%.0f", rate))fps tracked=\(skeleton.trackedSkeletons.count) tilt=\(String(format: "%.0f", skeleton.elevationDegrees)) floor=\(String(format: "%.2f", skeleton.floor_plane.w)) | \(sourceStatus)"]
+        var lines = ["L2K-LOG source=\(sourceChoice.rawValue) upper=\(upperBodyOnly) out=\(String(format: "%.0f", rate))fps tracked=\(skeleton.trackedSkeletons.count) tilt=\(String(format: "%.0f", skeleton.elevationDegrees)) floor=\(String(format: "%.2f", skeleton.floor_plane.w)) | \(live.sourceStatus)"]
         if let body = skeleton.trackedSkeletons.first?.skeleton {
             let h = body.position(of: .head), l = body.position(of: .handLeft), r = body.position(of: .handRight), f = body.position(of: .footLeft)
             lines.append(String(format: "L2K-LOG   head (%.2f %.2f %.2f) handL (%.2f %.2f %.2f) handR (%.2f %.2f %.2f) footL (%.2f %.2f %.2f) states %@",
                                 h.x, h.y, h.z, l.x, l.y, l.z, r.x, r.y, r.z, f.x, f.y, f.z, body.jointStates.map(String.init).joined()))
         }
-        lines += diagnostics.map { "L2K-LOG   " + $0 }
+        lines += live.diagnostics.map { "L2K-LOG   " + $0 }
+        lines.append(screenLine)
         print(lines.joined(separator: "\n"))
         fflush(stdout)
     }
@@ -216,8 +233,8 @@ final class SensorModel: ObservableObject {
             let lidar = VisionDepthSource()
             lidar.forceVisionMask = UserDefaults.standard.bool(forKey: "l2kVisionMask") // -l2kVisionMask 1
             source = lidar
-        case .ultrawide: source = UltraWideSource()
-        case .front: source = UltraWideSource(lens: .front)
+        case .ultrawide: source = Self.cameraSource(.rearUltraWide)
+        case .front: source = Self.cameraSource(.front)
         case .arkit: source = ARKitBodySource()
         case .synthetic: source = SyntheticSource(players: players)
         }
@@ -233,9 +250,20 @@ final class SensorModel: ObservableObject {
             sourceError = nil
         } catch {
             sourceError = error.localizedDescription
-            sourceStatus = "Stopped"
+            live.sourceStatus = "Stopped"
         }
     }
+
+    #if !targetEnvironment(simulator)
+    private static func cameraSource(_ lens: UltraWideSource.Lens) -> UltraWideSource {
+        let defaults = UserDefaults.standard
+        UltraWideSource.formatOverride = defaults.string(forKey: "l2kFormat") // -l2kFormat 1280x720 (troubleshooting)
+        let source = UltraWideSource(lens: lens)
+        // -l2kVisionCamera 0: let Vision assume its own camera, as before 0.9.1 (distances about twice too large)
+        source.usesCameraIntrinsics = defaults.object(forKey: "l2kVisionCamera") == nil || defaults.bool(forKey: "l2kVisionCamera")
+        return source
+    }
+    #endif
 
     private func applyPreviewMode() {
         session.localWantsColor = previewMode == .color
@@ -275,6 +303,15 @@ final class Previewer {
     }
 
     private let previewQueue = DispatchQueue(label: "l2k.preview", qos: .userInitiated)
+    // Main queue only: pictures handed to the screen, and the longest the main queue took to take one.
+    private var shown = 0
+    private var mainLate: TimeInterval = 0
+
+    /// Main queue: how many pictures reached the screen since the last call, and the longest wait for the main queue.
+    func takeScreenStats() -> (shown: Int, late: TimeInterval) {
+        defer { shown = 0; mainLate = 0 }
+        return (shown, mainLate)
+    }
     private var building = false
     private var lastPreview: TimeInterval = 0
     private var rateStart: TimeInterval = 0
@@ -327,7 +364,14 @@ final class Previewer {
             if let image { self?.snapshotIfAsked(image, zoom: zoom, skeleton: skeleton) }
             let distance = frame.realDistance
             let picture = frame.pictureSkeleton
-            DispatchQueue.main.async { self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics, distance, picture) }
+            let posted = ProcessInfo.processInfo.systemUptime
+            DispatchQueue.main.async {
+                if let self {
+                    self.shown += 1
+                    self.mainLate = max(self.mainLate, ProcessInfo.processInfo.systemUptime - posted)
+                }
+                self?.onPreview?(image, zoom, skeleton, rate, status, diagnostics, distance, picture)
+            }
             guard let self else { return }
             self.lock.lock()
             self.building = false

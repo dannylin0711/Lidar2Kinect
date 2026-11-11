@@ -55,6 +55,16 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     private var bodyVisible = false
     private var trackingID: UInt32 = 0
     private var seenRate = JointSeenRate()
+    private var visionQuadrant: Int32 = -1
+    private var workMs = 0.0, delayMs = 0.0
+
+    /// For troubleshooting: use the capture format of this size ("1280x720") instead of the one with the widest view.
+    public static var formatOverride: String?
+    /// Give Vision the camera's intrinsics, so that its distances are true ones (see VisionCanvas.swift).
+    public var usesCameraIntrinsics: Bool {
+        get { detector.givesIntrinsics }
+        set { detector.givesIntrinsics = newValue }
+    }
 
     private let stateLock = NSLock()
     private var lastStatus = "Starting"
@@ -195,7 +205,15 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             // The format that shows the most. The device stays locked until the session runs, so the session does not
             // put its own choice back.
             let all = Self.formats(of: camera)
-            let chosen = L2KCameraView.widestFormat(all.map(\.info))
+            var chosen = L2KCameraView.widestFormat(all.map(\.info))
+            var forced = false
+            if let wanted = Self.formatOverride?.lowercased().split(separator: "x").compactMap({ Int($0) }), wanted.count == 2 {
+                let same = all.indices.filter { all[$0].info.width == wanted[0] && all[$0].info.height == wanted[1] && all[$0].info.maxFrameRate >= 29.5 }
+                if let index = same.max(by: { all[$0].info.viewArea < all[$1].info.viewArea }) {
+                    chosen = index
+                    forced = true
+                }
+            }
             let locked = (try? camera.lockForConfiguration()) != nil
             if locked {
                 if let chosen { camera.activeFormat = all[chosen].format }
@@ -218,8 +236,8 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             if let chosen {
                 let info = all[chosen].info
                 self.formatFieldOfView = info.fieldOfView
-                self.formatLine = String(format: "Format %d×%d, the widest view of %d formats: %.0f° × %.0f°", info.width, info.height,
-                                         all.count, info.fieldOfView, info.verticalFieldOfView)
+                self.formatLine = String(format: "Format %d×%d, %@ of %d formats: %.0f° × %.0f°", info.width, info.height,
+                                         forced ? "asked for (-l2kFormat)" : "the widest view", all.count, info.fieldOfView, info.verticalFieldOfView)
             }
             if let connection = output.connection(with: .video) {
                 // The picture as the camera sees it: not mirrored (a front camera's can be), not stabilised (that crops).
@@ -239,6 +257,9 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let image = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        // How old the picture already is when it arrives here (exposure to delivery).
+        let age = CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), CMSampleBufferGetPresentationTimeStamp(sampleBuffer)).seconds
+        if age.isFinite { delayMs = delayMs == 0 ? age * 1000 : delayMs * 0.9 + age * 100 }
         frames += 1
         rateCount += 1
         if rateStart == 0 { rateStart = now }
@@ -269,16 +290,30 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
         // camera looks along +z(device); its image, not mirrored, is assumed to have x along -y(device) and y along
         // -x(device) (a sensor upright with the device held the other way round in landscape), and `mounting` puts
         // that right from the system's own level angle if this device's front camera sits differently.
+        // The system's level angle is the turn the connection has to apply to the camera's own frames. The frames
+        // here have already been turned by the connection's angle - not 0 for every camera: the iPhone 17 Pro's front
+        // camera has a level angle of 0° in portrait, yet its frames arrive lying on their side as an older front
+        // camera's do (seen 2026-11-11) - so what is left to turn is the difference.
+        let connectionAngle = Float(connection.videoRotationAngle)
+        let levelAngle = rotation.map { L2KCameraView.remainingTurn(levelAngle: Float($0.videoRotationAngleForHorizonLevelCapture), applied: connectionAngle) }
         var up = SIMD3<Float>(0, 1, 0)
         var haveGravity = false
         if let g = motion.deviceMotion?.gravity {
             let assumed = lens == .front ? SIMD3(Float(g.y), Float(g.x), Float(g.z)) : SIMD3(Float(g.y), Float(-g.x), Float(-g.z))
             if simd_length(assumed) > 1e-3 {
-                up = mounting.correct(up: simd_normalize(assumed), levelAngle: rotation.map { Float($0.videoRotationAngleForHorizonLevelCapture) })
+                up = mounting.correct(up: simd_normalize(assumed), levelAngle: levelAngle)
                 haveGravity = true
             }
         }
-        let quadrant = l2k_quadrant_from_up(up.x, up.y)
+        // Which way is up for Vision. A device lying flat has no "up" in its picture: the roll then stays as it was,
+        // and it only changes when the picture is clearly turned (the picture for Vision changes shape with it).
+        let candidate = l2k_quadrant_from_up(up.x, up.y)
+        if visionQuadrant < 0 {
+            visionQuadrant = candidate
+        } else if candidate != visionQuadrant, simd_length(SIMD2(up.x, up.y)) > 0.35, abs(abs(up.x) - abs(up.y)) > 0.25 {
+            visionQuadrant = candidate
+        }
+        let quadrant = visionQuadrant
 
         let visionStart = ProcessInfo.processInfo.systemUptime
         let joints = detector.detect(in: image, quadrant: quadrant, camera: camera)
@@ -309,7 +344,7 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             if !formatLine.isEmpty { lines.append(formatLine) }
             lines.append("Gravity: \(haveGravity ? "from the motion sensors" : "not available, assuming the device is upright")"
                          + String(format: ", up in camera space (%.2f %.2f %.2f)", up.x, up.y, up.z))
-            lines.append(mounting.summary + (rotation.map { String(format: " (level angle %.0f°)", $0.videoRotationAngleForHorizonLevelCapture) } ?? ""))
+            lines.append(mounting.summary + (rotation.map { String(format: " (level angle %.0f°, frames already turned %.0f°)", $0.videoRotationAngleForHorizonLevelCapture, connectionAngle) } ?? ""))
             if !joints.isEmpty {
                 // where Vision put each joint in the camera buffer (u right, v down), and how far away
                 lines.append("Joints u,v,m: " + joints.map { String(format: "%d:%.2f,%.2f,%.1f", $0.source, $0.u, $0.v, $0.depth) }.joined(separator: " "))
@@ -317,6 +352,19 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             lines.append(String(format: "Vision 2D + 3D pose: %d joints (%d from the picture, %d from the model), %.0f ms; with mask %.0f ms",
                                 joints.count, detector.lastSeen, detector.lastModelOnly, poseMs, visionMs)
                          + (detector.lastError.map { " — \($0)" } ?? ""))
+            if let layout = detector.lastLayout {
+                var line = String(format: "Picture for Vision %d×%d (camera image %.0f×%.0f in it), drawn in %.1f ms", layout.width, layout.height,
+                                  layout.content.width, layout.content.height, detector.lastDrawMs)
+                if !usesCameraIntrinsics {
+                    line += "; Vision's own camera (-l2kVisionCamera 0)"
+                } else if let used = detector.lastFocalUsed {
+                    line += String(format: "; focal length given %.0f px, used by Vision %.0f px", detector.lastFocalGiven, used)
+                } else {
+                    line += String(format: "; focal length given %.0f px", detector.lastFocalGiven)
+                }
+                lines.append(line)
+            }
+            lines.append(String(format: "Timing: picture %.0f ms old on arrival, %.0f ms of work per frame, device %@", delayMs, workMs, Self.thermalName))
             lines.append(seenRate.summary)
             if !joints.isEmpty {
                 lines.append(String(format: "Body height %.2f m (%@)", detector.lastHeight, detector.lastHeightMeasured ? "measured" : "assumed"))
@@ -327,6 +375,18 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
 
         onFrame?(L2KSourceFrame(timestamp: now, bodies: bodies, upCamera: up, camera: camera,
                                 depthMap: nil, segmentation: lastMask, image: image))
+        let work = (ProcessInfo.processInfo.systemUptime - now) * 1000
+        workMs = workMs == 0 ? work : workMs * 0.9 + work * 0.1
+    }
+
+    private static var thermalName: String {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: return "cool"
+        case .fair: return "warm"
+        case .serious: return "hot (the system slows it down)"
+        case .critical: return "very hot (the system slows it down hard)"
+        @unknown default: return "?"
+        }
     }
 
     private func setStatus(_ status: String, diagnostics: [String]) {

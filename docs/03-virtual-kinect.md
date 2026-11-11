@@ -195,8 +195,8 @@ ARKit alone therefore cannot give a body and LiDAR depth in the same session.
 | Source | Where the body comes from | Bodies | Depth image | Status |
 |---|---|---|---|---|
 | LiDAR depth (`VisionDepthSource`) | ARKit world tracking for the image, intrinsics, gravity and the LiDAR depth map; **Vision** 2D body pose on the camera image, lifted with the depth map | up to 2 | the LiDAR depth map; players from ARKit's person mask where it combines with scene depth, else Vision's | written 2026-11-10; coordinate handling tested on the Mac; **not yet run on a device** |
-| Ultra-wide (`UltraWideSource`) | the rear ultra-wide camera on a plain capture session (no ARKit, no LiDAR); **Vision 3D body pose** on the image; gravity from the motion sensors | 1 | none measured: Vision's person mask at the body's distance | written 2026-11-10; ran on an iPhone 17 Pro at 30 fps with a body seen; accuracy not assessed |
-| Front camera (`UltraWideSource(lens: .front)`) | the widest camera on the screen's side, otherwise as the ultra-wide; picture not mirrored; the sensor's mounting checked against the system's level angle | 1 | as the ultra-wide | written 2026-11-11; **not yet run on a device** |
+| Ultra-wide (`UltraWideSource`) | the rear ultra-wide camera on a plain capture session (no ARKit, no LiDAR); **Vision 3D body pose** on the image; gravity from the motion sensors | 1 | none measured: Vision's person mask at the body's distance | written 2026-11-10; ran on an iPhone 17 Pro at 30 fps with a body seen (1920×1440 since 0.9.0); accuracy not assessed |
+| Front camera (`UltraWideSource(lens: .front)`) | the widest camera on the screen's side, otherwise as the ultra-wide; picture not mirrored; the sensor's mounting checked against the system's level angle | 1 | as the ultra-wide | written 2026-11-11; ran on an iPhone 17 Pro (0.9.1) at 30 fps, 1280×1280, with a body seen and the mounting check agreeing; not played with |
 | Body tracking (`ARKitBodySource`) | ARKit's model-based 3D skeleton | 1 | no depth map on these devices: drawn from the skeleton | ran on Danny's devices without a skeleton appearing; cause not established |
 | Synthetic figure (`SyntheticSource`, `l2k_synth_body`) | generated | 1–2 | drawn from the skeleton | working; used by tests, the simulator and `l2k_fake_sender` |
 
@@ -222,14 +222,34 @@ standing person fits from about a metre away. Since 0.9.0 the source uses the ca
 the format with the largest view (a 4:3 format reads the whole sensor, about 105° × 89°; chosen by
 `L2KCameraView.widestFormat`, frames up to 2048 px wide), distortion correction on, no
 stabilisation, zoom or Center Stage. The view the device really delivers is in the live
-diagnostics ("Format …", "Field of view …"); not yet read on a device. Vision's 3D request gives each joint's position in
+diagnostics ("Format …", "Field of view …"); on the iPhone 17 Pro it is 1920×1440, and the frame's own
+intrinsics give 95–103° × 79–86° (they move with the focus). Vision's 3D request gives each joint's position in
 the image and its distance along the optical axis; the 3D point is rebuilt with the camera's own
 intrinsics (`VisionBody3DDetector.place`), so it does not depend on Vision's axis conventions.
 Vision assumes a body height of 1.80 m when it cannot measure one, so distances are right in
-proportion but only roughly in scale. The Kinect images still have the Kinect's field of view:
+proportion but only roughly in scale (a person 1.62 m tall is reported 11 % too far). The Kinect images still have the Kinect's field of view:
 they show the middle of what the camera sees, while the skeleton carries every joint (those outside
 the image set the clipped-edge bits). The app's colour preview zooms out until the whole camera
 image shows (`L2KCameraView.zoomToFit`) and frames the Kinect's own image with a dashed rectangle.
+
+**The picture Vision gets (0.9.1).** Not the camera buffer: the buffer turned upright for the
+device's roll and fitted, with black bars, into a fixed 720×1280 picture (1280×720 when the upright
+image is wider than high), drawn by `VisionCanvas`; Vision's points are mapped back through
+`VisionCanvasLayout`. Three reasons, all seen on 2026-11-11:
+- Vision's 3D request crashed inside its own padding (`padImage`, AltruisticBodyPoseKit) on the
+  front camera's square 1280×1280 frames as soon as a body was in view (iPhone 17 Pro, iOS 27.3).
+- A 3D request that has seen a wide picture fails on a tall one and the other way round ("Invalid
+  X-dimension 288/192" on macOS 27, where a new request works again; on the iPhone the app twice
+  printed "E5RT … Surface Object's width does not match" and exited while being picked up). New
+  requests are made when the picture's shape changes, and the roll used for Vision only changes
+  when the picture is clearly turned (a device lying flat keeps the roll it had).
+- Without intrinsics Vision assumes a focal length of 0.76 × the picture's height (measured on
+  macOS 27 at five picture sizes; the same body's distance doubles when the focal length given
+  doubles). With an ultra-wide camera every distance was therefore about twice too large. The
+  picture's own intrinsics are now given (`VNImageOption.cameraIntrinsics`); on the Mac Vision
+  then works with the focal length given to within 2 %. On the iPhone the one reading with a body
+  (close, upper body only) was 385 px used against 494 px given — **not settled on a device**; the
+  diagnostics line "Picture for Vision …" shows both. `-l2kVisionCamera 0` leaves the intrinsics out.
 
 **Front camera.** The same source on the camera of the screen's side, for a player in front of the
 device's own screen. Its picture is taken unmirrored, so it is a camera facing the player like any
@@ -238,6 +258,11 @@ device axes; a front camera looks along +z(device), and its picture is assumed t
 -y(device) and y along -x(device). Because that mounting differs between devices, the roll worked
 out from gravity is compared with the angle the system gives for a level picture of that camera;
 a steady disagreement turns the assumed mounting by the missing quarter turns (`L2KCameraMounting`).
+The system's angle is the turn the capture connection has to apply to the camera's own frames; the
+frames delivered have already been turned by the connection's angle, so what is compared is the
+difference (`L2KCameraView.remainingTurn`). On the iPhone 17 Pro's front camera the level angle is
+0° in portrait and the connection's angle is 270°: the frames arrive lying on their side, as the
+assumed mounting says (0.9.0 took the 0° alone and showed the picture a quarter turn off).
 
 **Ultra-wide, depths.** Device snapshots showed the 3D request's pose sitting off the body, so its
 depths are not used either. Each joint is placed on its image ray at the bone's length from its
