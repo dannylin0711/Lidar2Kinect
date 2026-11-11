@@ -235,6 +235,113 @@ final class L2KKitTests: XCTestCase {
         XCTAssertGreaterThan(red(320, 240), 10)
     }
 
+    /// The capture format with the whole view: the 4:3 one that reads the whole sensor, not a 16:9 crop of it, and
+    /// not a bigger frame than body detection needs.
+    func testWidestFormatIsTheWholeSensor() {
+        let formats = [
+            L2KCameraFormat(width: 1280, height: 720, fieldOfView: 105, maxFrameRate: 60),
+            L2KCameraFormat(width: 1920, height: 1080, fieldOfView: 105, maxFrameRate: 60),
+            L2KCameraFormat(width: 640, height: 480, fieldOfView: 105, maxFrameRate: 30),
+            L2KCameraFormat(width: 1920, height: 1440, fieldOfView: 105, maxFrameRate: 30),
+            L2KCameraFormat(width: 1440, height: 1080, fieldOfView: 105, maxFrameRate: 30),
+            L2KCameraFormat(width: 4032, height: 3024, fieldOfView: 105, maxFrameRate: 30),
+            L2KCameraFormat(width: 4032, height: 3024, fieldOfView: 106, maxFrameRate: 15), // too slow for 30 frames/s
+            L2KCameraFormat(width: 3840, height: 2160, fieldOfView: 96, maxFrameRate: 60),  // a cropped 4K format
+        ]
+        XCTAssertEqual(L2KCameraView.widestFormat(formats), 4)
+        XCTAssertEqual(formats[4].verticalFieldOfView, 88.7, accuracy: 0.2)
+        XCTAssertEqual(formats[0].verticalFieldOfView, 72.5, accuracy: 0.2) // the old 1280x720 choice
+        // Nothing wide is big enough: the largest of the widest.
+        XCTAssertEqual(L2KCameraView.widestFormat([formats[2], L2KCameraFormat(width: 1024, height: 768, fieldOfView: 105, maxFrameRate: 30)]), 1)
+        // The whole sensor only comes photo-sized (4032 wide): a smaller frame with less view is taken instead ...
+        XCTAssertEqual(L2KCameraView.widestFormat([formats[0], formats[1], formats[5]]), 0)
+        // ... unless there is nothing smaller.
+        XCTAssertEqual(L2KCameraView.widestFormat([formats[5]]), 0)
+        // Nothing reaches 30 frames/s: still an answer.
+        XCTAssertEqual(L2KCameraView.widestFormat([formats[6]]), 0)
+        XCTAssertNil(L2KCameraView.widestFormat([]))
+    }
+
+    /// The whole-view preview: just wide enough for the camera image, for every roll of the device.
+    func testPreviewZoomShowsTheWholeCamera() throws {
+        // A 4:3 camera 105 degrees wide, centred.
+        let tanH = tan(Float(105) * .pi / 360), tanV = tanH * 3 / 4
+        let camera = l2k_src_camera(fxn: 0.5 / tanH, fyn: 0.5 / tanV, cxn: 0.5, cyn: 0.5)
+        var cam = camera
+        for quadrant in Int32(0)..<4 {
+            let zoom = L2KCameraView.zoomToFit(camera: camera, quadrant: quadrant)
+            // Every corner of the camera image is inside the zoomed view, and one of them is on its edge.
+            var reach: Float = 0
+            let lo = 0.5 - zoom / 2, hi = 0.5 + zoom / 2
+            var ax: Float = 0, ay: Float = 0, bx: Float = 0, by: Float = 0
+            l2k_virtual_to_source(&cam, quadrant, lo, lo, &ax, &ay)
+            l2k_virtual_to_source(&cam, quadrant, hi, hi, &bx, &by)
+            let sLo = SIMD2(ax, ay), sHi = SIMD2(bx, by)
+            let low = simd_min(sLo, sHi), high = simd_max(sLo, sHi)
+            XCTAssertLessThanOrEqual(low.x, 1e-4, "quadrant \(quadrant)")
+            XCTAssertLessThanOrEqual(low.y, 1e-4, "quadrant \(quadrant)")
+            XCTAssertGreaterThanOrEqual(high.x, 1 - 1e-4, "quadrant \(quadrant)")
+            XCTAssertGreaterThanOrEqual(high.y, 1 - 1e-4, "quadrant \(quadrant)")
+            reach = min(abs(low.x), abs(low.y), abs(high.x - 1), abs(high.y - 1))
+            XCTAssertLessThan(reach, 1e-3, "quadrant \(quadrant): the view is wider than it needs to be")
+        }
+        // Landscape: the 4:3 camera and the 4:3 Kinect image have the same shape, so the zoom is the ratio of the views.
+        XCTAssertEqual(L2KCameraView.zoomToFit(camera: camera, quadrant: 0), 2.33, accuracy: 0.05)
+        // The synthetic source is exactly as wide as the Kinect: nothing to zoom out for.
+        let source = SyntheticSource(players: 1)
+        XCTAssertEqual(L2KCameraView.zoomToFit(camera: source.frame(at: 0, timestamp: 1).camera, quadrant: 0), 1, accuracy: 0.01)
+        // And through the pipeline: the fit replaces the fixed zoom.
+        let pipeline = L2KPipeline()
+        var frame = source.frame(at: 0.2, timestamp: 1)
+        frame.camera = camera
+        let out = pipeline.process(frame, kind: source.kind, wantDepth: false, wantColor: true, playersOnly: true, colorPreviewFit: true)
+        XCTAssertNotNil(out.colorPreview)
+        XCTAssertEqual(out.colorPreviewZoom, 2.33, accuracy: 0.05)
+    }
+
+    /// The system's level angle as a roll quadrant, and a camera that is mounted another way round than assumed.
+    func testCameraMountingFromTheLevelAngle() {
+        XCTAssertEqual(L2KCameraView.quadrant(forLevelAngle: 0), 0)
+        XCTAssertEqual(L2KCameraView.quadrant(forLevelAngle: 90), 3)  // an iPhone in portrait: the buffer's left is up
+        XCTAssertEqual(L2KCameraView.quadrant(forLevelAngle: 180), 2)
+        XCTAssertEqual(L2KCameraView.quadrant(forLevelAngle: 270), 1)
+        XCTAssertEqual(L2KCameraView.quadrant(forLevelAngle: 360), 0)
+        XCTAssertEqual(l2k_quadrant_from_up(-1, 0), 3)
+
+        // Mounted as assumed: nothing changes.
+        var mounting = L2KCameraMounting()
+        let portrait = simd_normalize(SIMD3<Float>(-0.95, 0.05, 0.3))
+        for _ in 0..<40 { XCTAssertEqual(mounting.correct(up: portrait, levelAngle: 90), portrait) }
+        XCTAssertEqual(mounting.quarterTurns, 0)
+        XCTAssertEqual(mounting.agreed, 40)
+
+        // The system says the frames are level as they are, while gravity under the assumed mounting says "left is
+        // up": the sensor sits a quarter turn round. Believed after a steady run, not after one frame.
+        mounting = L2KCameraMounting()
+        XCTAssertEqual(mounting.correct(up: portrait, levelAngle: 0), portrait)
+        var up = portrait
+        for _ in 0..<20 { up = mounting.correct(up: portrait, levelAngle: 0) }
+        XCTAssertNotEqual(mounting.quarterTurns, 0)
+        XCTAssertEqual(l2k_quadrant_from_up(up.x, up.y), 0)
+        XCTAssertEqual(up.z, portrait.z) // the tilt towards the camera is not touched
+
+        // A device lying flat, or held on a diagonal, says nothing.
+        mounting = L2KCameraMounting()
+        for _ in 0..<40 {
+            _ = mounting.correct(up: SIMD3(0.05, 0.02, 0.99), levelAngle: 180)
+            _ = mounting.correct(up: simd_normalize(SIMD3(0.7, 0.72, 0.1)), levelAngle: 180)
+        }
+        XCTAssertEqual(mounting.quarterTurns, 0)
+        XCTAssertEqual(mounting.compared, 0)
+
+        // A camera whose mounting is known only counts.
+        mounting = L2KCameraMounting(adopts: false)
+        for _ in 0..<40 { _ = mounting.correct(up: portrait, levelAngle: 0) }
+        XCTAssertEqual(mounting.quarterTurns, 0)
+        XCTAssertEqual(mounting.agreed, 0)
+        XCTAssertEqual(mounting.compared, 40)
+    }
+
     /// Runs Vision's body pose on a picture if one is given (L2K_TEST_IMAGE=/path/to.png) and prints what it finds.
     func testVisionOnAPicture() throws {
         guard let path = ProcessInfo.processInfo.environment["L2K_TEST_IMAGE"] else { throw XCTSkip("no L2K_TEST_IMAGE") }

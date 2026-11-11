@@ -8,12 +8,13 @@ import SwiftUI
 @MainActor
 final class SensorModel: ObservableObject {
     enum SourceChoice: String, CaseIterable, Identifiable {
-        case lidar, ultrawide, arkit, synthetic
+        case lidar, ultrawide, front, arkit, synthetic
         var id: String { rawValue }
         var title: String {
             switch self {
             case .lidar: return "LiDAR depth"
             case .ultrawide: return "Ultra-wide"
+            case .front: return "Front camera"
             case .arkit: return "Body tracking"
             case .synthetic: return "Test figure"
             }
@@ -75,8 +76,8 @@ final class SensorModel: ObservableObject {
     @Published var preview: CGImage?
     @Published var skeleton: l2k_skeleton_frame?
     @Published var frameRate: Double = 0
-    /// How many times wider than the Kinect's image the colour preview is (1 = the Kinect's own image).
-    @Published var previewZoom: CGFloat = 1
+    /// The colour preview shows the camera's whole view, not only the part the Kinect's image covers.
+    private var showsWholeCamera = false
     /// The zoom of the picture currently shown (the depth preview is never zoomed).
     @Published var shownZoom: CGFloat = 1
     @Published var diagnostics: [String] = []
@@ -103,12 +104,13 @@ final class SensorModel: ObservableObject {
         #else
         if VisionDepthSource.isSupported { sources.append(.lidar) }
         if UltraWideSource.isSupported { sources.append(.ultrawide) }
+        if UltraWideSource.isSupported(.front) { sources.append(.front) }
         if ARKitBodySource.isSupported { sources.append(.arkit) }
         deviceSupport = L2KDeviceSupport.report()
         #endif
         sources.append(.synthetic)
         availableSources = sources
-        // Launch arguments (also plain defaults): -l2kSource lidar|arkit|synthetic, -l2kHost, -l2kPort, -l2kPlayers, -l2kAutoConnect 1
+        // Launch arguments (also plain defaults): -l2kSource lidar|ultrawide|front|arkit|synthetic, -l2kHost, -l2kPort, -l2kPlayers, -l2kAutoConnect 1
         // Default: the first camera source the device supports (LiDAR depth before 3D body tracking).
         let wanted = SourceChoice(rawValue: defaults.string(forKey: "l2kSource") ?? "")
         sourceChoice = wanted.flatMap { sources.contains($0) ? $0 : nil } ?? sources[0]
@@ -163,6 +165,9 @@ final class SensorModel: ObservableObject {
             for item in deviceSupport { print("L2K-LOG support \(item.supported ? "yes" : "no ") \(item.label)") }
             #if !targetEnvironment(simulator)
             for line in L2KDeviceSupport.videoFormats() { print("L2K-LOG " + line) }
+            for lens in [UltraWideSource.Lens.rearUltraWide, .front] {
+                for line in UltraWideSource.formatReport(for: lens) { print("L2K-LOG " + line) }
+            }
             #endif
             fflush(stdout)
         }
@@ -212,6 +217,7 @@ final class SensorModel: ObservableObject {
             lidar.forceVisionMask = UserDefaults.standard.bool(forKey: "l2kVisionMask") // -l2kVisionMask 1
             source = lidar
         case .ultrawide: source = UltraWideSource()
+        case .front: source = UltraWideSource(lens: .front)
         case .arkit: source = ARKitBodySource()
         case .synthetic: source = SyntheticSource(players: players)
         }
@@ -219,8 +225,8 @@ final class SensorModel: ObservableObject {
         previewer.source = source
         previewer.context = session.pipeline.ciContext
         session.onFrame = { [previewer] frame in previewer.handle(frame) }
-        // The ultra-wide camera sees far more than the Kinect's image: show twice the Kinect's view.
-        previewZoom = sourceChoice == .ultrawide ? 2 : 1
+        // The ultra-wide and front cameras see far more than the Kinect's image: show everything they see.
+        showsWholeCamera = sourceChoice == .ultrawide || sourceChoice == .front
         applyPreviewMode()
         do {
             try session.start(source)
@@ -235,7 +241,7 @@ final class SensorModel: ObservableObject {
         session.localWantsColor = previewMode == .color
         session.localWantsDepth = previewMode == .depth
         session.localWantsDepthPreview = previewMode == .depth
-        session.localColorPreviewZoom = previewMode == .color ? Float(previewZoom) : 1
+        session.localColorPreviewFitsCamera = previewMode == .color && showsWholeCamera
         previewer.mode = previewMode
     }
 

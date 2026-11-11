@@ -26,6 +26,34 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-11 (3) — the camera's whole view, front camera (Apple side)
+
+Danny: "Make ultrawide detect in full view, add the front camera option." **No change to `shared/`**
+(a front camera frame is `L2K_SOURCE_VISION_3D`, like the ultra-wide's).
+
+- **Whole view.** `UltraWideSource` ran the 1280×720 preset, a 16:9 cut of the 4:3 sensor (measured
+  105° × 73°). It now picks the capture format with the largest view (`L2KCameraView.widestFormat`:
+  largest view in tangent space at 30 fps, frames up to 2048 px wide, the smallest one at least
+  1280 px wide), keeps geometric distortion correction on (the maths assumes a pinhole picture),
+  and switches off everything that crops: stabilisation, zoom, Center Stage (front). For a 4:3
+  format at 105° that is 105° × 89°. Vision already got the whole frame.
+- **Preview.** The app's colour preview for these cameras showed twice the Kinect's view (about
+  96° × 80°, cutting the picture's sides). It now zooms out exactly as far as the whole camera image
+  needs, for every roll (`L2KCameraView.zoomToFit`, `L2KSession.localColorPreviewFitsCamera`).
+- **Front camera.** `UltraWideSource(lens: .front)`: the camera on the screen's side with the widest
+  view, same Vision 2D + 3D pose and bone-length depths as the ultra-wide, picture not mirrored.
+  Where "up" is in a front camera's picture depends on how the sensor is mounted, which differs
+  between devices; the assumed mounting is checked against the system's own level angle
+  (`AVCaptureDevice.RotationCoordinator`) and corrected when they steadily disagree
+  (`L2KCameraMounting`; the rear camera only reports the comparison). App 0.9.0: "Front camera" in
+  the camera list (now a menu), `-l2kSource front`; `-l2kLog 1` lists both lenses' formats.
+- Verified: `swift test` 15 tests (3 new: format choice, preview fit for the four rolls, mounting
+  from the level angle); the app builds for iOS. **Not run on a device** (iPad and iPhone were
+  locked or out of reach): the format actually chosen and its measured view, the front camera's
+  mounting check, the frame rate with the larger frames, and body detection through the front
+  camera are all unverified. First thing to read on a device: the "Format …" and "Camera
+  mounting …" lines of the live diagnostics.
+
 ## 2026-11-11 (2) — normalising for Dance Evolution (Apple side)
 
 - Danny asked for an option that sends the skeleton at the optimal position for the game.

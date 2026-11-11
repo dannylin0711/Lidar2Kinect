@@ -196,6 +196,7 @@ ARKit alone therefore cannot give a body and LiDAR depth in the same session.
 |---|---|---|---|---|
 | LiDAR depth (`VisionDepthSource`) | ARKit world tracking for the image, intrinsics, gravity and the LiDAR depth map; **Vision** 2D body pose on the camera image, lifted with the depth map | up to 2 | the LiDAR depth map; players from ARKit's person mask where it combines with scene depth, else Vision's | written 2026-11-10; coordinate handling tested on the Mac; **not yet run on a device** |
 | Ultra-wide (`UltraWideSource`) | the rear ultra-wide camera on a plain capture session (no ARKit, no LiDAR); **Vision 3D body pose** on the image; gravity from the motion sensors | 1 | none measured: Vision's person mask at the body's distance | written 2026-11-10; ran on an iPhone 17 Pro at 30 fps with a body seen; accuracy not assessed |
+| Front camera (`UltraWideSource(lens: .front)`) | the widest camera on the screen's side, otherwise as the ultra-wide; picture not mirrored; the sensor's mounting checked against the system's level angle | 1 | as the ultra-wide | written 2026-11-11; **not yet run on a device** |
 | Body tracking (`ARKitBodySource`) | ARKit's model-based 3D skeleton | 1 | no depth map on these devices: drawn from the skeleton | ran on Danny's devices without a skeleton appearing; cause not established |
 | Synthetic figure (`SyntheticSource`, `l2k_synth_body`) | generated | 1–2 | drawn from the skeleton | working; used by tests, the simulator and `l2k_fake_sender` |
 
@@ -217,14 +218,26 @@ right side blue so this can be checked at a glance on a device.
 **Ultra-wide.** The LiDAR covers only the normal wide camera's view, and ARKit offers only that
 camera (every world- and body-tracking video format on the iPhone 17 Pro is the wide-angle camera).
 The ultra-wide camera measured 105° × 73° at 1280×720, against the Kinect's 58.5° × 45.6°, so a
-standing person fits from about a metre away. Vision's 3D request gives each joint's position in
+standing person fits from about a metre away. Since 0.9.0 the source uses the camera's whole view:
+the format with the largest view (a 4:3 format reads the whole sensor, about 105° × 89°; chosen by
+`L2KCameraView.widestFormat`, frames up to 2048 px wide), distortion correction on, no
+stabilisation, zoom or Center Stage. The view the device really delivers is in the live
+diagnostics ("Format …", "Field of view …"); not yet read on a device. Vision's 3D request gives each joint's position in
 the image and its distance along the optical axis; the 3D point is rebuilt with the camera's own
 intrinsics (`VisionBody3DDetector.place`), so it does not depend on Vision's axis conventions.
 Vision assumes a body height of 1.80 m when it cannot measure one, so distances are right in
 proportion but only roughly in scale. The Kinect images still have the Kinect's field of view:
 they show the middle of what the camera sees, while the skeleton carries every joint (those outside
-the image set the clipped-edge bits). The app's colour preview zooms out to twice the Kinect's view
-and frames the Kinect's own image with a dashed rectangle.
+the image set the clipped-edge bits). The app's colour preview zooms out until the whole camera
+image shows (`L2KCameraView.zoomToFit`) and frames the Kinect's own image with a dashed rectangle.
+
+**Front camera.** The same source on the camera of the screen's side, for a player in front of the
+device's own screen. Its picture is taken unmirrored, so it is a camera facing the player like any
+other and Vision's left / right stay the person's own. World up comes from the motion sensors in
+device axes; a front camera looks along +z(device), and its picture is assumed to have x along
+-y(device) and y along -x(device). Because that mounting differs between devices, the roll worked
+out from gravity is compared with the angle the system gives for a level picture of that camera;
+a steady disagreement turns the assumed mounting by the missing quarter turns (`L2KCameraMounting`).
 
 **Ultra-wide, depths.** Device snapshots showed the 3D request's pose sitting off the body, so its
 depths are not used either. Each joint is placed on its image ray at the bone's length from its

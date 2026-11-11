@@ -100,8 +100,10 @@ public final class L2KPipeline {
 
     /// Build the Kinect frame for one source frame. Call from one queue only.
     /// - Parameter playersOnly: keep depth only on player pixels (L2K_DEPTH_MODE_PLAYERS).
+    /// - Parameter colorPreviewFit: make `colorPreview` just wide enough to show the whole camera image, whatever
+    ///   `colorPreviewZoom` says (no preview when the camera sees no more than the Kinect).
     public func process(_ source: L2KSourceFrame, kind: UInt8, wantDepth: Bool, wantColor: Bool, playersOnly: Bool,
-                        wantDepthPreview: Bool = false, colorPreviewZoom: Float = 1) -> L2KFrame {
+                        wantDepthPreview: Bool = false, colorPreviewZoom: Float = 1, colorPreviewFit: Bool = false) -> L2KFrame {
         let q = updateQuadrant(up: source.upCamera)
         mapper.params.upper_body = upperBodyMode ? 1 : 0
         mapper.params.keep_identity = keepIdentity ? 1 : 0
@@ -128,9 +130,10 @@ public final class L2KPipeline {
         if wantDepthPreview {
             frame.depthPreview = depthPreview(source, quadrant: q)
         }
-        if colorPreviewZoom > 1, let image = source.image {
-            frame.colorPreview = colorImage(image, camera: source.camera, quadrant: q, zoom: colorPreviewZoom)
-            frame.colorPreviewZoom = colorPreviewZoom
+        let zoom = colorPreviewFit ? L2KCameraView.zoomToFit(camera: source.camera, quadrant: q) : colorPreviewZoom
+        if zoom > 1, let image = source.image {
+            frame.colorPreview = colorImage(image, camera: source.camera, quadrant: q, zoom: zoom)
+            frame.colorPreviewZoom = zoom
         }
         return frame
     }

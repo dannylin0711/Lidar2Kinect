@@ -32,7 +32,7 @@ struct ContentView: View {
             Text(model.previewMode == .depth
                  ? "Depth: bright = near, blue = outside the Kinect's 0.8–4 m, green = person, black = no reading. Skeleton: orange = your left, blue = your right."
                  : "Skeleton: orange = your left side, blue = your right side."
-                    + (model.shownZoom > 1 ? " The dashed frame is what the game's Kinect image shows." : ""))
+                    + (model.shownZoom > 1 ? " The picture is everything the camera sees; the dashed frame is what the game's Kinect image shows." : ""))
                 .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             Picker("Preview", selection: $model.previewMode) {
                 ForEach(SensorModel.PreviewMode.allCases) { Text($0.title).tag($0) }
@@ -112,10 +112,21 @@ struct ContentView: View {
     private var sensorCard: some View {
         Card(title: "Sensor") {
             if model.cameraAvailable {
-                Picker("Source", selection: Binding(get: { model.sourceChoice }, set: { model.selectSource($0) })) {
-                    ForEach(model.availableSources) { Text($0.title).tag($0) }
+                HStack {
+                    Text("Camera")
+                    Spacer()
+                    Picker("Camera", selection: Binding(get: { model.sourceChoice }, set: { model.selectSource($0) })) {
+                        ForEach(model.availableSources) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.menu)
                 }
-                .pickerStyle(.segmented)
+                if model.sourceChoice == .front {
+                    Text("The camera on the screen's side, for playing in front of this device. No depth sensor: distances are estimated from the picture.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else if model.sourceChoice == .ultrawide {
+                    Text("The rear ultra-wide camera, for standing close. No depth sensor: distances are estimated from the picture.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             } else {
                 Text("This device has no body tracking camera, so the test figure is used.")
                     .font(.footnote).foregroundStyle(.secondary)
