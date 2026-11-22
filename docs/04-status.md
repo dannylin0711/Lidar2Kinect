@@ -26,6 +26,33 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-22 — 0.9.4: limb depths from one camera, measured against known poses (Apple side)
+
+Danny (iPad Pro 11" M2, front camera, in the Dance Evolution port): "Some body note does not recognize". Measured
+with the port's sensor bench (its `docs/47`): the port's dancer rendered from a front camera (exact poses) and two
+videos of players, through `VisionHybridDetector` → `L2KPipeline` → the game's judges. **No change to `shared/` or
+to the packets.**
+
+- **Cause.** The game's pose and shake notes compare the 3D directions of the arms and legs (all three axes on 76 % of
+  pose notes). With the 3D model choosing each bone's towards / away, the limbs' tilt out of the picture came out
+  with the wrong sign more often than not (render: forearms −25° true / +27° measured, thighs −15° / +15°, shins
+  +16° / −24°; median errors 59° forearm, 42° shin), and the 2D joints' bone lengths are 10–20 % off the model's.
+  Pose notes 75 % hit and shake notes 14–31 % on the player videos; position notes (which ignore depth) ~100 %.
+- **0.9.4** (`VisionPose.swift`, docs/03 §7 "Limb depths since 0.9.4"): `VisionHybridDetector` split into
+  `observe` / `combine`; bone lengths = 90th percentile of the bone's span in the picture (`LengthSource.picture`);
+  `DepthRule.adaptive`: a limb bone parallel to the picture unless shortened below 0.8 (arms) / 0.75 (legs) of its
+  length, then towards the camera (upper arm, forearm, thigh) or away (shin); `VisionKinematics.Placement`.
+  `UltraWideSource.depthFromModel` / app `-l2kDepthModel 1` = the 0.9.3 rule. App 0.9.4 build 17 (`project.yml`).
+- **Bench, before → after:** player videos poses 75 % → 100 %, shake ends 19–25 % → 78 %, steps 76–88 % → 83–95 %;
+  rendered dancer shakes 29 % → 100 %, limb errors 31–60° → 9–35°; position notes unchanged.
+- **Also measured:** the iPad's 39–49 ms is not what loses notes (an ideal sensor keeps poses / shakes / ripples at
+  100 % up to 267 ms); the tracked test never failed (missing joints are inferred, dropouts held); Vision's left /
+  right are the person's own.
+- Verified: `swift test` 22 tests (new `testPlanarUnlessShortPlacement`), `make -C shared test` 1136 checks, the
+  picture tests with a rendered frame (`L2K_TEST_IMAGE`). **Not verified:** anything on a device; Vision on iOS
+  against macOS; Danny's own play. The old report "left hand wrong in the game though right in the app" fits this
+  mechanism (2D right, depth wrong) but was on another source and was not reproduced.
+
 ## 2026-11-22 — 0.9.3: less delay from the camera-only sources (Apple side)
 
 Danny: "is there any way to improve front camera latency" → "do 1 and 2" (skeleton before the mask;

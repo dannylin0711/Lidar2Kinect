@@ -803,6 +803,39 @@ final class L2KKitTests: XCTestCase {
         }
     }
 
+    /// 0.9.4's placement of a limb (`VisionKinematics.Placement`): parallel to the picture unless the picture shows the
+    /// bone clearly shortened, then on its ray at its length on the side the rule asks for.
+    func testPlanarUnlessShortPlacement() {
+        let camera = l2k_src_camera(fxn: 0.38, fyn: 0.68, cxn: 0.5, cyn: 0.5)
+        func image(_ p: SIMD3<Float>) -> (Float, Float) { (camera.cxn + camera.fxn * p.x / -p.z, camera.cyn - camera.fyn * p.y / -p.z) }
+        // a chain pelvis → neck → left shoulder → left elbow at 2 m (placed parallel to the picture), then the wrist
+        let pelvis = SIMD3<Float>(0, -0.4, -2.0), neck = SIMD3<Float>(0, 0.1, -2.0), shoulder = SIMD3<Float>(0.1, 0.1, -2.0)
+        let elbow = SIMD3<Float>(0.3, 0.1, -2.0)
+        let planarWrist = elbow + SIMD3(0.25, -0.05, 0)                     // in the picture plane: stays there
+        let towardsWrist = elbow + simd_normalize(SIMD3(0.1, 0, 0.3)) * 0.26 // pointing at the camera: shows 0.32 of its length
+        var lengths: [Int: Float] = [:], away: [Int: Bool] = [:]
+        for (joint, _) in VisionKinematics.tree { lengths[joint] = 0.3; away[joint] = false }
+        lengths[Int(L2K_SRC_WRIST_LEFT)] = 0.26
+        let place: [Int: VisionKinematics.Placement] = [Int(L2K_SRC_NECK): .planar, Int(L2K_SRC_SHOULDER_LEFT): .planar,
+                                                        Int(L2K_SRC_ELBOW_LEFT): .planar, Int(L2K_SRC_WRIST_LEFT): .planarUnlessShort(0.8)]
+        for (wrist, expectPlanar) in [(planarWrist, true), (towardsWrist, false)] {
+            var js: [VisionJoint3D] = []
+            for (s, p) in [(L2K_SRC_PELVIS, pelvis), (L2K_SRC_NECK, neck), (L2K_SRC_SHOULDER_LEFT, shoulder), (L2K_SRC_ELBOW_LEFT, elbow),
+                           (L2K_SRC_WRIST_LEFT, wrist)] {
+                let (u, v) = image(p)
+                js.append(VisionJoint3D(source: Int(s), u: u, v: v, depth: s == L2K_SRC_PELVIS ? 2.0 : 9))
+            }
+            let out = VisionKinematics.lift(js, lengths: lengths, away: away, camera: camera, placement: place)
+            let w = out.first { $0.source == Int(L2K_SRC_WRIST_LEFT) }!
+            let p = VisionKinematics.point(u: w.u, v: w.v, depth: w.depth, camera: camera)
+            if expectPlanar {
+                XCTAssertEqual(p.z, elbow.z, accuracy: 1e-4, "an unshortened forearm stays parallel to the picture")
+            } else {
+                XCTAssertEqual(simd_distance(p, wrist), 0, accuracy: 2e-3, "a shortened forearm is placed towards the camera at its length")
+            }
+        }
+    }
+
     func testPersonTrackerKeepsIdentities() {
         var tracker = VisionPersonTracker()
         func person(_ x: Float) -> VisionPerson { VisionPerson(joints: [], centre: SIMD2(x, 0.5), size: 0.2) }

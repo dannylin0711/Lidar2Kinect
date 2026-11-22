@@ -236,12 +236,13 @@ enum VisionKinematics {
 
     /// The child joint on the ray through (u, v), `length` away from `parent`. `away` picks the solution farther from
     /// the camera. When the ray passes farther than `length` from the parent (the picture disagrees with the bone
-    /// length), the nearest point of the ray is used.
-    static func child(parent: SIMD3<Float>, u: Float, v: Float, length: Float, away: Bool, camera: l2k_src_camera) -> SIMD3<Float> {
+    /// length), or with `perpendicular`, the nearest point of the ray to the parent is used.
+    static func child(parent: SIMD3<Float>, u: Float, v: Float, length: Float, away: Bool, camera: l2k_src_camera,
+                      perpendicular: Bool = false) -> SIMD3<Float> {
         let ray = simd_normalize(point(u: u, v: v, depth: 1, camera: camera))
         let along = simd_dot(ray, parent) // the foot of the perpendicular from the parent
         let discriminant = along * along - simd_length_squared(parent) + length * length
-        let t = discriminant > 0 ? along + (away ? 1 : -1) * discriminant.squareRoot() : along
+        let t = discriminant > 0 && !perpendicular ? along + (away ? 1 : -1) * discriminant.squareRoot() : along
         return ray * max(t, 0.05)
     }
 
@@ -251,10 +252,23 @@ enum VisionKinematics {
         return simd_length(child) > simd_dot(ray, parent)
     }
 
-    /// Re-place `joints` (their u, v kept, their depths replaced): the root keeps `rootDepth`; every other joint is
-    /// solved from its parent with the bone `lengths` and the towards / `away` choice per joint. Joints whose parent
-    /// or length is unknown keep the depth they came with.
-    static func lift(_ joints: [VisionJoint3D], lengths: [Int: Float], away: [Int: Bool], camera: l2k_src_camera) -> [VisionJoint3D] {
+    /// How a joint is placed from its parent.
+    enum Placement: Equatable {
+        /// On its ray at the bone's length: the far or the near solution (`away`).
+        case length
+        /// The foot of the perpendicular: the bone square to its ray, its length not kept.
+        case perpendicular
+        /// At the parent's distance from the camera: the bone parallel to the picture, its length not kept.
+        case planar
+        /// Planar, unless the picture shows the bone shorter than this fraction of its length: then `.length`.
+        case planarUnlessShort(Float)
+    }
+
+    /// Re-place `joints` (their u, v kept, their depths replaced): the root keeps its depth; every other joint is
+    /// placed from its parent by its `placement` (default `.length`, with the bone `lengths` and the towards / `away`
+    /// choice per joint). Joints whose parent or length is unknown keep the depth they came with.
+    static func lift(_ joints: [VisionJoint3D], lengths: [Int: Float], away: [Int: Bool], camera: l2k_src_camera,
+                     placement: [Int: Placement] = [:]) -> [VisionJoint3D] {
         var bySource = Dictionary(uniqueKeysWithValues: joints.map { ($0.source, $0) })
         var points: [Int: SIMD3<Float>] = [:]
         let root = bySource[Int(L2K_SRC_PELVIS)] != nil ? Int(L2K_SRC_PELVIS) : Int(L2K_SRC_NECK)
@@ -265,7 +279,15 @@ enum VisionKinematics {
         for (joint, parent) in edges {
             guard var j = bySource[joint] else { continue }
             if let p = points[parent], let length = lengths[joint] {
-                let c = child(parent: p, u: j.u, v: j.v, length: length, away: away[joint] ?? false, camera: camera)
+                let onRay = { child(parent: p, u: j.u, v: j.v, length: length, away: away[joint] ?? false, camera: camera,
+                                    perpendicular: placement[joint] == .perpendicular) }
+                let flat = point(u: j.u, v: j.v, depth: -p.z, camera: camera)
+                let c: SIMD3<Float>
+                switch placement[joint] ?? .length {
+                case .length, .perpendicular: c = onRay()
+                case .planar: c = flat
+                case .planarUnlessShort(let ratio): c = simd_distance(flat, p) < ratio * length ? onRay() : flat
+                }
                 j.depth = -c.z
                 points[joint] = c
             } else {
@@ -318,12 +340,44 @@ final class VisionHybridDetector {
     /// a person's proportions are the stable part of what the model reports.
     private var boneLengths: [Int: Float] = [:]
 
+    /// How the limbs' depths are chosen (measured with the Dance Evolution port's sensor bench against rendered
+    /// dancers with known poses and against videos of players: its docs/47; Lidar2Kinect docs/03 §7).
+    /// - `model` (before 0.9.4): every bone towards or away from the camera as the 3D model has it. On the bench the
+    ///   model's choice for forearms, thighs and shins was the wrong one more often than not.
+    /// - `adaptive` (0.9.4): a limb bone lies parallel to the picture unless the picture shows it clearly shorter than
+    ///   it is (arms < 0.8, legs < 0.75 of their length); a shortened upper arm, forearm or thigh points towards the
+    ///   camera, a shortened shin away from it (a player facing the screen reaches towards it; a knee bends backwards).
+    ///   The torso, shoulders and hips keep the model's choice.
+    /// - `inverted`, `perpendicular`, `prior` (adaptive's towards / away without the parallel case), `planar` (limbs
+    ///   always parallel): the alternatives measured on the bench.
+    enum DepthRule { case model, inverted, perpendicular, prior, planar, adaptive }
+    var depthRule = DepthRule.adaptive
+    var armForeshortening: Float = 0.8, legForeshortening: Float = 0.75
+    /// Where the bone lengths come from: the 3D model (before 0.9.4) or the picture's own spans (0.9.4).
+    enum LengthSource { case model, picture }
+    var lengthSource = LengthSource.picture
+    private var pictureLengths: [Int: Float] = [:]
+
+    /// What Vision reported for one picture, in camera buffer coordinates: the 3D model's joints and every person the 2D
+    /// detector found. `combine` turns it into the joints that are sent; the two halves are apart so that a recorded
+    /// observation can be combined again (the sensor bench of the Dance Evolution port, its docs/47).
+    struct Observation {
+        var model: [VisionJoint3D]
+        var people: [VisionPerson]
+    }
+
     func detect(in image: CVPixelBuffer, quadrant: Int32, camera: l2k_src_camera) -> [VisionJoint3D] {
+        guard let observation = observe(image, quadrant: quadrant, camera: camera) else { return [] }
+        return combine(observation, camera: camera)
+    }
+
+    /// Vision's two requests on one picture; nil when the 3D request finds nobody.
+    func observe(_ image: CVPixelBuffer, quadrant: Int32, camera: l2k_src_camera) -> Observation? {
         // Vision sees an upright picture of a fixed size, never the camera buffer (see VisionCanvas.swift).
         let drawStart = ProcessInfo.processInfo.systemUptime
         guard let (picture, layout) = canvas.draw(image, quadrant: quadrant) else {
             lastError = "the picture for Vision could not be made"
-            return []
+            return nil
         }
         lastDrawMs = (ProcessInfo.processInfo.systemUptime - drawStart) * 1000
         lastLayout = layout
@@ -347,20 +401,28 @@ final class VisionHybridDetector {
             lastError = nil
         } catch {
             lastError = error.localizedDescription
-            return []
+            return nil
         }
         lastFocalUsed = nil
-        guard let observation = request3D.results?.first else { return [] }
+        guard let observation = request3D.results?.first else { return nil }
         lastHeight = observation.bodyHeight
         lastHeightMeasured = observation.heightEstimation == .measured
         lastFocalUsed = VisionBody3DDetector.focalLength(of: observation, pictureHeight: Float(layout.height))
         let model = VisionBody3DDetector.joints(of: observation, bufferPoint: layout.bufferPoint(fromVision:))
+        let people = (request2D.results ?? []).compactMap { detector2D.person(from: $0, bufferPoint: layout.bufferPoint(fromVision:)) }
+        return Observation(model: model, people: people)
+    }
+
+    /// The joints sent for one observation: where each joint is in the picture from the 2D detector, how far away from
+    /// the bone lengths and the 3D model (see the type's comment). Keeps the bone lengths over time.
+    func combine(_ observation: Observation, camera: l2k_src_camera) -> [VisionJoint3D] {
+        let model = observation.model
         guard !model.isEmpty else { return [] }
         let depth = Dictionary(uniqueKeysWithValues: model.map { ($0.source, $0.depth) })
         let modelRoot = model.first { $0.source == Int(L2K_SRC_PELVIS) } ?? model[0]
 
         // The 2D person that is the 3D request's person: the one whose centre is nearest to the model's root.
-        let people = (request2D.results ?? []).compactMap { detector2D.person(from: $0, bufferPoint: layout.bufferPoint(fromVision:)) }
+        let people = observation.people
         let person = people.min { simd_distance($0.centre, SIMD2(modelRoot.u, modelRoot.v)) < simd_distance($1.centre, SIMD2(modelRoot.u, modelRoot.v)) }
         var joints: [VisionJoint3D] = []
         var seen = Set<Int>()
@@ -389,7 +451,8 @@ final class VisionHybridDetector {
         }
         lastModelOnly = joints.count - lastSeen
 
-        // Depths: from the picture and the bone lengths, with the model saying only which way each bone leans.
+        // Depths: from the picture and the bone lengths, with the model saying which way each bone leans where the
+        // depth rule leaves that to it.
         var modelPoints: [Int: SIMD3<Float>] = [:]
         for m in model { modelPoints[m.source] = VisionKinematics.point(u: m.u, v: m.v, depth: m.depth, camera: camera) }
         var away: [Int: Bool] = [:]
@@ -400,8 +463,42 @@ final class VisionHybridDetector {
                 boneLengths[joint] = boneLengths[joint].map { $0 * 0.9 + length * 0.1 } ?? length
             }
             away[joint] = VisionKinematics.isAway(parent: p, child: c)
+            if depthRule == .inverted { away[joint]?.toggle() }
         }
-        return VisionKinematics.lift(joints, lengths: boneLengths, away: away, camera: camera)
+        // the limbs: elbows and wrists hang on the arms, knees and ankles on the legs
+        let arms = Set([L2K_SRC_ELBOW_LEFT, L2K_SRC_WRIST_LEFT, L2K_SRC_ELBOW_RIGHT, L2K_SRC_WRIST_RIGHT].map { Int($0) })
+        let legs = Set([L2K_SRC_KNEE_LEFT, L2K_SRC_ANKLE_LEFT, L2K_SRC_KNEE_RIGHT, L2K_SRC_ANKLE_RIGHT].map { Int($0) })
+        let shins: Set<Int> = [Int(L2K_SRC_ANKLE_LEFT), Int(L2K_SRC_ANKLE_RIGHT)]
+        var placement: [Int: VisionKinematics.Placement] = [:]
+        switch depthRule {
+        case .model, .inverted: break
+        case .perpendicular: for (j, _) in VisionKinematics.tree { placement[j] = .perpendicular }
+        case .planar: for j in arms.union(legs) { placement[j] = .planar }
+        case .prior, .adaptive:
+            for j in arms.union(legs) {
+                away[j] = shins.contains(j)
+                if depthRule == .adaptive { placement[j] = .planarUnlessShort(arms.contains(j) ? armForeshortening : legForeshortening) }
+            }
+        }
+        // Bone lengths as the picture shows them: the 2D detector's joints are not the 3D model's (on the bench its
+        // thigh was ~15 % shorter, its shin up to ~15 % longer), so with the model's lengths a bone lying in the
+        // picture plane is lifted out of it. The 90th percentile over time of the bone's span in the picture (both
+        // joints seen, at the parent's model distance) is the length the bone shows when it lies flat.
+        var lengths = boneLengths
+        if lengthSource == .picture {
+            let seenAt = Dictionary(uniqueKeysWithValues: joints.filter { $0.confidence == 2 }.map { ($0.source, $0) })
+            for (joint, parent) in VisionKinematics.tree {
+                guard let a = seenAt[joint], let b = seenAt[parent], let d = depth[parent], let model = boneLengths[joint] else { continue }
+                let span = simd_distance(VisionKinematics.point(u: a.u, v: a.v, depth: d, camera: camera),
+                                         VisionKinematics.point(u: b.u, v: b.v, depth: d, camera: camera))
+                var l = pictureLengths[joint] ?? model
+                let step = 0.01 * l
+                l += span > l ? step * 0.9 : -step * 0.1
+                pictureLengths[joint] = min(max(l, 0.5 * model), 1.6 * model)
+            }
+            for (j, l) in pictureLengths { lengths[j] = l }
+        }
+        return VisionKinematics.lift(joints, lengths: lengths, away: away, camera: camera, placement: placement)
     }
 }
 

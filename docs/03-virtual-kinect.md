@@ -285,6 +285,28 @@ which — towards the camera or away. Bone lengths are the 3D model's, averaged 
 (pelvis) keeps the model's distance. Tested on the Mac against a known body; not yet judged on a
 person.
 
+**Limb depths since 0.9.4 (camera-only sources).** Measured with the Dance Evolution port's sensor bench
+(its `docs/47`): the port's dancer rendered from a front camera (known pose in every picture) and two
+videos of players, run through this detector. With the 3D model choosing towards / away, the limbs'
+tilt out of the picture plane came out with the wrong sign more often than not (rendered dancer:
+forearms −25° true, +27° measured; thighs −15° / +15°; shins +16° / −24°; median errors 59° forearm,
+42° shin), and the 2D detector's joints do not match the 3D model's bone lengths (its thigh ~15 %
+shorter, its shin up to ~15 % longer), so a limb lying in the picture plane was lifted out of it. The
+game compares the 3D directions of the arms and legs on 3/4 of its pose notes, so those notes failed.
+0.9.4 (`VisionHybridDetector.DepthRule.adaptive`, `LengthSource.picture`):
+
+- bone lengths: the 90th percentile over time of the bone's span in the picture (both joints seen, at
+  the parent's model distance), not the model's length;
+- a limb bone (upper arm, forearm, thigh, shin) lies parallel to the picture unless the picture shows
+  it shorter than 0.8 (arms) / 0.75 (legs) of its length; a shortened upper arm, forearm or thigh is
+  placed towards the camera, a shortened shin away from it (a player facing the screen reaches
+  towards it; a knee bends backwards). The torso, shoulders and hips keep the model's choice.
+
+Rendered dancer, median angle error per limb (two songs, two camera placements): upper arm 31–41° →
+20–22°, forearm 35–60° → 24–35°, thigh 13–37° → 10–34°, shin 30–43° → 9–23°. In the game (bench): pose
+notes 75 % → 100 % and shake ends 19–25 % → 78 % on two videos of players; position notes unchanged. `-l2kDepthModel 1`
+(app) / `UltraWideSource.depthFromModel` returns to the 0.9.3 rule. Not yet run on a device.
+
 **Measured on the iPhone 17 Pro (2026-11-10).**
 
 - ARKit: world tracking + LiDAR depth yes, + person mask yes, + 2D body no; 3D body tracking yes,

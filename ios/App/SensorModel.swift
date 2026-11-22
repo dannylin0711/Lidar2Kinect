@@ -303,6 +303,8 @@ final class SensorModel: ObservableObject {
         let source = UltraWideSource(lens: lens, captureRate: fast ? 60 : 30)
         // -l2kVisionCamera 0: let Vision assume its own camera, as before 0.9.1 (distances about twice too large)
         source.usesCameraIntrinsics = defaults.object(forKey: "l2kVisionCamera") == nil || defaults.bool(forKey: "l2kVisionCamera")
+        // -l2kDepthModel 1: the limbs' depths as before 0.9.4 (the 3D model's towards / away choice and bone lengths)
+        source.depthFromModel = defaults.bool(forKey: "l2kDepthModel")
         return source
     }
     #endif

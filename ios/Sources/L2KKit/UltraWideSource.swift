@@ -75,6 +75,16 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     /// For troubleshooting: use the capture format of this size ("1280x720") instead of the one with the widest view.
     public static var formatOverride: String?
     /// Give Vision the camera's intrinsics, so that its distances are true ones (see VisionCanvas.swift).
+    /// The limbs' depths as before 0.9.4: towards or away from the camera as Vision's 3D model has it, with the model's
+    /// bone lengths. Off (default): the 0.9.4 rule (`VisionHybridDetector.DepthRule.adaptive`, lengths from the picture).
+    public var depthFromModel: Bool {
+        get { detector.depthRule == .model }
+        set {
+            detector.depthRule = newValue ? .model : .adaptive
+            detector.lengthSource = newValue ? .model : .picture
+        }
+    }
+
     public var usesCameraIntrinsics: Bool {
         get { detector.givesIntrinsics }
         set { detector.givesIntrinsics = newValue }
