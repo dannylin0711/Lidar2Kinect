@@ -26,6 +26,37 @@ Details and measurements: `windows/STATUS.md`.
   New test `test_cabinet_scene` (782 checks pass on Windows). **Not run on macOS:** `make -C shared
   test` and `swift test` — please run them.
 
+## 2026-11-22 — 0.9.3: less delay from the camera-only sources (Apple side)
+
+Danny: "is there any way to improve front camera latency" → "do 1 and 2" (skeleton before the mask;
+60 fps capture).
+
+- **The skeleton is handed on before any image work.** `L2KPipeline.process` is now
+  `skeletonFrame` + `addImages` (`process` still does both). `L2KSession` sends the skeleton
+  packet and calls the new `onSkeleton` first; the images, their packets and `onFrame` follow.
+  `UltraWideSource` no longer makes Vision's person mask before the skeleton: the mask is made on
+  demand (`L2KSourceFrame.makeSegmentation` / `personMask`) when a depth image wants it, and not at
+  all when nothing does. `L2KSender.send(skeleton:)` / `sendImages(of:depth:jpeg:)`.
+  **No change to `shared/` or to the packets**: same packets in the same order; the skeleton packet
+  leaves 6–10 ms before the images instead of in one batch with them.
+- **60 fps capture** (`UltraWideSource(lens:captureRate:)`, both lenses): the widest format at
+  60 frames a second, every second frame detected on, so still 30 skeleton frames a second. App:
+  "Faster camera (60 frames a second)" for the ultra-wide and front sources, `-l2kFastCamera 0|1`;
+  on by default only where the fast format shows the same view (`fastCameraKeepsView`).
+- "Timing" line: "… skeleton handed on N ms after the picture was taken"; "Camera frames … (60/s,
+  30/s used)"; "Format … at 60 fps"; "Person mask (Vision): … made after the skeleton in N ms".
+- **Measured on the iPad Pro 11" (M2), front camera, on the device (app 0.9.3 build 16):** 30 fps:
+  picture 46–48 ms old on arrival, skeleton ready 64–68 ms after the picture; 60 fps (the default
+  there: 1920×1440, 107° × 91° at both rates): 28–32 ms and 44–52 ms, 59–61 camera frames a second,
+  30 used; mask made after the skeleton in 6–7 ms. Table in `docs/03` §7.
+- Verified: `swift test` 21 tests (2 new: the fast format choice and frame thinning; skeleton
+  before images and the mask on demand), `make -C shared test` 1136 checks, device build.
+- **Not verified:** 60 fps on the iPhone 17 Pro (its fast front format sees 84° × 68° instead of
+  84° × 84°, so it is off by default there); tracking quality at 60 fps under room light (the
+  exposure limit is 1/120 s at both rates); the delay of the whole chain up to the game's screen;
+  the Windows side with the skeleton packet arriving ahead of the images (same order as before).
+- `VisionDepthSource` (LiDAR) still makes its mask before the skeleton; not changed.
+
 ## 2026-11-11 (5) — 0.9.2: the preview jumping, the game's images on the player (Apple side)
 
 Danny sent a screen recording from the iPhone 17 Pro (front camera, landscape, "Best position" on,

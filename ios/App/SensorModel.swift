@@ -105,6 +105,38 @@ final class SensorModel: ObservableObject {
     var cameraAvailable: Bool { availableSources.count > 1 }
     private let session = L2KSession()
     private let discovery = L2KDiscovery()
+    /// The camera-only sources (ultra-wide, front) run their camera at 60 frames a second: less delay, often less view.
+    /// Until it is chosen by hand it is on for a camera that shows as much at 60 as at 30 (`fastCameraKeepsView`).
+    @Published var fastCamera: Bool {
+        didSet {
+            guard fastCamera != oldValue, !followingCamera else { return }
+            UserDefaults.standard.set(fastCamera, forKey: "l2kFastCamera")
+            if started, sourceChoice == .ultrawide || sourceChoice == .front { startSource() }
+        }
+    }
+    /// The chosen camera loses no view at 60 frames a second.
+    @Published private(set) var fastCameraKeepsView = false
+    private var followingCamera = false
+
+    private static func fastCameraKeepsView(_ choice: SourceChoice) -> Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        switch choice {
+        case .front: return UltraWideSource.fastCameraKeepsView(.front)
+        case .ultrawide: return UltraWideSource.fastCameraKeepsView(.rearUltraWide)
+        default: return false
+        }
+        #endif
+    }
+
+    /// The faster camera's setting for the chosen source: the stored choice, else on when it costs no view.
+    private func followCamera() {
+        fastCameraKeepsView = Self.fastCameraKeepsView(sourceChoice)
+        followingCamera = true
+        fastCamera = UserDefaults.standard.object(forKey: "l2kFastCamera") as? Bool ?? fastCameraKeepsView
+        followingCamera = false
+    }
     private let previewer = Previewer()
     private var started = false
     private let players: Int
@@ -139,6 +171,9 @@ final class SensorModel: ObservableObject {
         normalize = defaults.bool(forKey: "l2kNormalize") // -l2kNormalize 1
         normalizePlayers = defaults.object(forKey: "l2kNormalizePlayers") as? Int ?? 1 // -l2kNormalizePlayers 2
         fitPlayArea = defaults.object(forKey: "l2kFitArea") as? Bool ?? true // -l2kFitArea 0
+        let keepsView = Self.fastCameraKeepsView(wanted.flatMap { sources.contains($0) ? $0 : nil } ?? sources[0])
+        fastCameraKeepsView = keepsView
+        fastCamera = defaults.object(forKey: "l2kFastCamera") as? Bool ?? keepsView // -l2kFastCamera 0 | 1
         session.pipeline.fitPlayArea = fitPlayArea
         // -l2kImagesFollow 0: the game's images are always the middle of the camera picture, as before 0.9.2
         session.pipeline.imagesFollowSkeleton = defaults.object(forKey: "l2kImagesFollow") == nil || defaults.bool(forKey: "l2kImagesFollow")
@@ -185,7 +220,7 @@ final class SensorModel: ObservableObject {
             #if !targetEnvironment(simulator)
             for line in L2KDeviceSupport.videoFormats() { print("L2K-LOG " + line) }
             for lens in [UltraWideSource.Lens.rearUltraWide, .front] {
-                for line in UltraWideSource.formatReport(for: lens) { print("L2K-LOG " + line) }
+                for line in UltraWideSource.formatReport(for: lens, captureRate: fastCamera ? 60 : 30) { print("L2K-LOG " + line) }
             }
             #endif
             fflush(stdout)
@@ -226,6 +261,7 @@ final class SensorModel: ObservableObject {
         guard choice != sourceChoice else { return }
         sourceChoice = choice
         UserDefaults.standard.set(choice.rawValue, forKey: "l2kSource")
+        followCamera()
         startSource()
     }
 
@@ -239,8 +275,8 @@ final class SensorModel: ObservableObject {
             let lidar = VisionDepthSource()
             lidar.forceVisionMask = UserDefaults.standard.bool(forKey: "l2kVisionMask") // -l2kVisionMask 1
             source = lidar
-        case .ultrawide: source = Self.cameraSource(.rearUltraWide)
-        case .front: source = Self.cameraSource(.front)
+        case .ultrawide: source = Self.cameraSource(.rearUltraWide, fast: fastCamera)
+        case .front: source = Self.cameraSource(.front, fast: fastCamera)
         case .arkit: source = ARKitBodySource()
         case .synthetic: source = SyntheticSource(players: players)
         }
@@ -261,10 +297,10 @@ final class SensorModel: ObservableObject {
     }
 
     #if !targetEnvironment(simulator)
-    private static func cameraSource(_ lens: UltraWideSource.Lens) -> UltraWideSource {
+    private static func cameraSource(_ lens: UltraWideSource.Lens, fast: Bool) -> UltraWideSource {
         let defaults = UserDefaults.standard
         UltraWideSource.formatOverride = defaults.string(forKey: "l2kFormat") // -l2kFormat 1280x720 (troubleshooting)
-        let source = UltraWideSource(lens: lens)
+        let source = UltraWideSource(lens: lens, captureRate: fast ? 60 : 30)
         // -l2kVisionCamera 0: let Vision assume its own camera, as before 0.9.1 (distances about twice too large)
         source.usesCameraIntrinsics = defaults.object(forKey: "l2kVisionCamera") == nil || defaults.bool(forKey: "l2kVisionCamera")
         return source

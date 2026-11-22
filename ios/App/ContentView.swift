@@ -81,6 +81,15 @@ struct ContentView: View {
                 Text("This device has no body tracking camera, so the test figure is used.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
+            if model.sourceChoice == .front || model.sourceChoice == .ultrawide {
+                Toggle("Faster camera (60 frames a second)", isOn: $model.fastCamera)
+                Text(model.fastCamera
+                     ? (model.fastCameraKeepsView
+                        ? "The camera runs at 60 frames a second, so your movement reaches the game sooner. This camera shows as much of the room as at 30."
+                        : "The camera runs at 60 frames a second, so your movement reaches the game sooner. This camera shows less of the room that fast: step back if you no longer fit in the picture.")
+                     : "The camera runs at 30 frames a second in the format that shows the most.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             Toggle("Upper body only", isOn: $model.upperBodyOnly)
             if model.upperBodyOnly {
                 Text("For a camera that sees you from the waist up. Your arms and head are tracked; the legs are filled in standing still, so foot and step notes will miss.")

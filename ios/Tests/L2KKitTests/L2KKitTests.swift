@@ -262,6 +262,115 @@ final class L2KKitTests: XCTestCase {
         XCTAssertNil(L2KCameraView.widestFormat([]))
     }
 
+    /// A 60 fps camera: the widest view among the formats that run that fast, and every second frame is detected on.
+    func testFastCameraFormatAndFrames() {
+        // the iPhone 17 Pro's front camera (read on the device, 2026-11-11)
+        let front = [
+            L2KCameraFormat(width: 640, height: 480, fieldOfView: 84.1, maxFrameRate: 60),
+            L2KCameraFormat(width: 960, height: 540, fieldOfView: 84.1, maxFrameRate: 30),
+            L2KCameraFormat(width: 1024, height: 768, fieldOfView: 84.1, maxFrameRate: 60),
+            L2KCameraFormat(width: 1280, height: 720, fieldOfView: 84.1, maxFrameRate: 30),
+            L2KCameraFormat(width: 1280, height: 1280, fieldOfView: 84.1, maxFrameRate: 30),
+        ]
+        XCTAssertEqual(L2KCameraView.widestFormat(front), 4)
+        XCTAssertEqual(L2KCameraView.widestFormat(front, frameRate: 60), 2)
+        XCTAssertEqual(front[2].verticalFieldOfView, 68.1, accuracy: 0.2)
+        XCTAssertFalse(L2KCameraView.fastFormatKeepsView(front)) // 84° × 68° instead of 84° × 84°
+        XCTAssertFalse(L2KCameraView.fastFormatKeepsView([front[1], front[3], front[4]])) // nothing runs at 60
+        // the iPad Pro 11" (M2) front camera (read on the device, 2026-11-22): the whole view at both rates
+        let pad = [
+            L2KCameraFormat(width: 1280, height: 720, fieldOfView: 106.8, maxFrameRate: 60),
+            L2KCameraFormat(width: 1440, height: 1080, fieldOfView: 101.4, maxFrameRate: 60),
+            L2KCameraFormat(width: 1920, height: 1440, fieldOfView: 106.8, maxFrameRate: 30),
+            L2KCameraFormat(width: 1920, height: 1440, fieldOfView: 106.8, maxFrameRate: 60),
+        ]
+        XCTAssertEqual(L2KCameraView.widestFormat(pad, frameRate: 60), 3)
+        XCTAssertTrue(L2KCameraView.fastFormatKeepsView(pad))
+        // no format runs at 60: the 30 fps choice
+        XCTAssertEqual(L2KCameraView.widestFormat([front[1], front[3], front[4]], frameRate: 60), 2)
+
+        func usedOf(_ times: [Double]) -> [Int] {
+            var last: Double?, used: [Int] = []
+            for (index, time) in times.enumerated() where L2KCameraView.usesFrame(at: time, last: last) {
+                last = time
+                used.append(index)
+            }
+            return used
+        }
+        XCTAssertEqual(usedOf((0..<8).map { Double($0) / 60 }), [0, 2, 4, 6])
+        XCTAssertEqual(usedOf((0..<5).map { Double($0) / 30 }), [0, 1, 2, 3, 4])
+        // frames a few milliseconds early or late at 30 fps are all used
+        XCTAssertEqual(usedOf([0, 0.030, 0.068, 0.099, 0.135]), [0, 1, 2, 3, 4])
+        // a 60 fps camera that lost the frame it would have used: the next one, not the one after
+        XCTAssertEqual(usedOf([0, 1.0 / 60, 3.0 / 60, 4.0 / 60, 5.0 / 60]), [0, 2, 4])
+        // the camera's clock starts again
+        XCTAssertEqual(usedOf([10, 0, 1.0 / 30]), [0, 1, 2])
+    }
+
+    /// The skeleton is handed on before the images: `onSkeleton` comes first, with no image and the same skeleton,
+    /// and a person mask that costs time is only made when an image wants it.
+    func testSkeletonBeforeImages() throws {
+        let session = L2KSession()
+        session.localWantsDepth = true
+        session.localRate = 30
+        let lock = NSLock()
+        var order: [String] = []
+        var early: [UInt32: l2k_skeleton_frame] = [:]
+        var mismatches = 0, earlyImages = 0, depthFrames = 0
+        let enough = expectation(description: "frames")
+        enough.assertForOverFulfill = false
+        session.onSkeleton = { frame in
+            lock.lock()
+            order.append("s\(frame.skeleton.frame_number)")
+            early[frame.skeleton.frame_number] = frame.skeleton
+            if frame.depth != nil || frame.color != nil { earlyImages += 1 }
+            lock.unlock()
+        }
+        session.onFrame = { frame in
+            lock.lock()
+            order.append("f\(frame.skeleton.frame_number)")
+            var a = early[frame.skeleton.frame_number] ?? l2k_skeleton_frame(), b = frame.skeleton
+            if memcmp(&a, &b, MemoryLayout<l2k_skeleton_frame>.size) != 0 { mismatches += 1 }
+            if frame.depth != nil { depthFrames += 1 }
+            let done = order.count >= 12
+            lock.unlock()
+            if done { enough.fulfill() }
+        }
+        try session.start(SyntheticSource(players: 1))
+        wait(for: [enough], timeout: 10)
+        session.stop()
+        lock.lock()
+        defer { lock.unlock() }
+        XCTAssertEqual(mismatches, 0)
+        XCTAssertEqual(earlyImages, 0)
+        XCTAssertGreaterThan(depthFrames, 3)
+        for pair in stride(from: 0, to: order.count - 1, by: 2) {
+            XCTAssertEqual(order[pair].first, "s")
+            XCTAssertEqual(order[pair + 1], "f" + order[pair].dropFirst())
+        }
+
+        // The mask on demand: not made for a frame without an image, made once for a frame with one.
+        let pipeline = L2KPipeline()
+        var made = 0
+        var mask: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 64, 48, kCVPixelFormatType_OneComponent8, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &mask)
+        var source = L2KSourceFrame(timestamp: 0, bodies: [], upCamera: SIMD3(0, 1, 0),
+                                    camera: l2k_src_camera(fxn: 1, fyn: 1, cxn: 0.5, cyn: 0.5))
+        source.makeSegmentation = { made += 1; return mask }
+        var frame = pipeline.skeletonFrame(source, kind: UInt8(L2K_SOURCE_VISION_3D))
+        XCTAssertEqual(made, 0)
+        pipeline.addImages(to: &frame, from: source, wantDepth: false, wantColor: false, playersOnly: false)
+        XCTAssertEqual(made, 0)
+        XCTAssertNil(frame.depth)
+        pipeline.addImages(to: &frame, from: source, wantDepth: true, wantColor: false, playersOnly: false)
+        XCTAssertEqual(made, 1)
+        XCTAssertNotNil(frame.depth)
+        // `process` is the two halves
+        let whole = pipeline.process(source, kind: UInt8(L2K_SOURCE_VISION_3D), wantDepth: true, wantColor: false, playersOnly: false)
+        XCTAssertEqual(made, 2)
+        XCTAssertEqual(whole.depth, frame.depth)
+    }
+
     /// The whole-view preview: just wide enough for the camera image, for every roll of the device.
     func testPreviewZoomShowsTheWholeCamera() throws {
         // A 4:3 camera 105 degrees wide, centred.

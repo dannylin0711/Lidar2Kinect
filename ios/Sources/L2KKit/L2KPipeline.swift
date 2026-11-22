@@ -161,6 +161,15 @@ public final class L2KPipeline {
     ///   `colorPreviewZoom` says (no preview when the camera sees no more than the Kinect).
     public func process(_ source: L2KSourceFrame, kind: UInt8, wantDepth: Bool, wantColor: Bool, playersOnly: Bool,
                         wantDepthPreview: Bool = false, colorPreviewZoom: Float = 1, colorPreviewFit: Bool = false) -> L2KFrame {
+        var frame = skeletonFrame(source, kind: kind)
+        addImages(to: &frame, from: source, wantDepth: wantDepth, wantColor: wantColor, playersOnly: playersOnly,
+                  wantDepthPreview: wantDepthPreview, colorPreviewZoom: colorPreviewZoom, colorPreviewFit: colorPreviewFit)
+        return frame
+    }
+
+    /// The first half of `process`: the Kinect skeleton frame, with no image. It takes well under a millisecond, so a
+    /// consumer that judges movement gets the skeleton before any image work is done (`L2KSession.onSkeleton`).
+    public func skeletonFrame(_ source: L2KSourceFrame, kind: UInt8) -> L2KFrame {
         let q = updateQuadrant(up: source.upCamera)
         mapper.params.upper_body = upperBodyMode ? 1 : 0
         mapper.params.keep_identity = keepIdentity ? 1 : 0
@@ -180,6 +189,14 @@ public final class L2KPipeline {
         frame.pictureSkeleton = picture
         // The images go where the skeleton that is sent is (the same skeleton when nothing moved it: no change).
         frame.gameView = updateGameView(sent: skeleton, picture: picture)
+        return frame
+    }
+
+    /// The second half of `process`: the images of the frame `skeletonFrame` made from the same source frame.
+    public func addImages(to frame: inout L2KFrame, from source: L2KSourceFrame, wantDepth: Bool, wantColor: Bool, playersOnly: Bool,
+                          wantDepthPreview: Bool = false, colorPreviewZoom: Float = 1, colorPreviewFit: Bool = false) {
+        let q = frame.quadrant
+        var skeleton = frame.skeleton
         let gameCamera = frame.gameView.isIdentity ? source.camera : frame.gameView.camera(source.camera, quadrant: q)
         if wantDepth {
             frame.depth = depthImage(source, camera: gameCamera, skeleton: &skeleton, quadrant: q, playersOnly: playersOnly)
@@ -195,7 +212,6 @@ public final class L2KPipeline {
             frame.colorPreview = colorImage(image, camera: source.camera, quadrant: q, zoom: zoom)
             frame.colorPreviewZoom = zoom
         }
-        return frame
     }
 
     /// JPEG of a frame's colour image.
@@ -240,7 +256,7 @@ public final class L2KPipeline {
         let width = Int32(L2K_DEPTH_WIDTH), height = Int32(L2K_DEPTH_HEIGHT)
         var pixels = [UInt16](repeating: 0, count: Int(width * height))
         let depthMap = source.depthMap.flatMap { CVPixelBufferGetPixelFormatType($0) == kCVPixelFormatType_DepthFloat32 ? $0 : nil }
-        let mask = source.segmentation.flatMap { CVPixelBufferGetPixelFormatType($0) == kCVPixelFormatType_OneComponent8 ? $0 : nil }
+        let mask = source.personMask.flatMap { CVPixelBufferGetPixelFormatType($0) == kCVPixelFormatType_OneComponent8 ? $0 : nil }
 
         if depthMap == nil && mask == nil {
             // The source sees no pixels at all (synthetic, or a device without depth and segmentation): draw the skeletons.
@@ -312,7 +328,7 @@ public final class L2KPipeline {
     /// The source's depth map (and mask) through the virtual Kinect camera, with nothing filtered out.
     private func depthPreview(_ source: L2KSourceFrame, quadrant: Int32) -> L2KDepthPreview? {
         guard let depthMap = source.depthMap, CVPixelBufferGetPixelFormatType(depthMap) == kCVPixelFormatType_DepthFloat32 else { return nil }
-        let mask = source.segmentation.flatMap { CVPixelBufferGetPixelFormatType($0) == kCVPixelFormatType_OneComponent8 ? $0 : nil }
+        let mask = source.personMask.flatMap { CVPixelBufferGetPixelFormatType($0) == kCVPixelFormatType_OneComponent8 ? $0 : nil }
         let width = Int(L2K_DEPTH_WIDTH), height = Int(L2K_DEPTH_HEIGHT)
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         if let mask { CVPixelBufferLockBaseAddress(mask, .readOnly) }

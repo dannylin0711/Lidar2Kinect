@@ -48,6 +48,23 @@ public enum L2KCameraView {
         return widest.max { (formats[$0].width, formats[$0].height) < (formats[$1].width, formats[$1].height) }
     }
 
+    /// Whether running the camera at `frameRate` costs no view: its widest format at that rate shows (within 2 %) as
+    /// much as its widest format at 30 frames a second.
+    public static func fastFormatKeepsView(_ formats: [L2KCameraFormat], frameRate: Double = 60) -> Bool {
+        guard let slow = widestFormat(formats), let fast = widestFormat(formats, frameRate: frameRate) else { return false }
+        return formats[fast].maxFrameRate >= frameRate - 0.5 && formats[fast].viewArea >= formats[slow].viewArea * 0.98
+    }
+
+    /// A camera that runs faster than the body detector: whether the frame taken at `time` (seconds) is one to detect
+    /// on, when the last one used was taken at `last` (nil: none yet) and `rate` detections a second are wanted. A
+    /// 60 fps camera gives every second frame; a camera at the wanted rate gives every frame, also when its frames
+    /// come a little early or late.
+    public static func usesFrame(at time: Double, last: Double?, rate: Double = 30) -> Bool {
+        guard let last, rate > 0 else { return true }
+        let gap = time - last
+        return gap < 0 || gap >= 0.75 / rate
+    }
+
     /// How many times the Kinect's field of view a virtual image must span, around the same centre, to show the whole
     /// camera image for a device rolled by `quadrant`. 1 when the camera sees no more than the Kinect.
     public static func zoomToFit(camera: l2k_src_camera, quadrant: Int32, limit: Float = 8) -> Float {

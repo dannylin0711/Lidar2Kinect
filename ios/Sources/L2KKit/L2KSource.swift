@@ -17,6 +17,9 @@ public struct L2KSourceFrame {
     public var depthMap: CVPixelBuffer?
     /// Person segmentation (kCVPixelFormatType_OneComponent8), registered to `image`.
     public var segmentation: CVPixelBuffer?
+    /// A source whose mask costs time gives this instead of `segmentation`: the mask is then made only when an image
+    /// needs it, after the skeleton has been handed on (`personMask`). Called on the source's queue, inside `onFrame`.
+    public var makeSegmentation: (() -> CVPixelBuffer?)?
     /// The camera image.
     public var image: CVPixelBuffer?
 
@@ -30,6 +33,9 @@ public struct L2KSourceFrame {
         self.segmentation = segmentation
         self.image = image
     }
+
+    /// The person mask: the one delivered with the frame, else the one the source makes when asked.
+    public var personMask: CVPixelBuffer? { segmentation ?? makeSegmentation?() }
 }
 
 public enum L2KSourceError: LocalizedError {

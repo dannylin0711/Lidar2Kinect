@@ -294,3 +294,33 @@ person.
 - Ultra-wide source: 30 frames/s, Vision 3D pose 17 ms, 23 ms with the person mask.
 - Vision's left / right are the person's own: on a frame of five dancers facing the viewer, every
   "left" shoulder and hip is on the image's right (`testVisionOnAPicture`).
+
+**Delay (camera-only sources, since 0.9.3).** What the game gets is late by the camera's own delay
+(exposure to the frame arriving in the app) plus Vision's pose. Two things keep the rest out of the
+skeleton's way:
+
+- *The skeleton goes first.* `L2KPipeline.skeletonFrame` makes the Kinect skeleton; `L2KSession`
+  sends its packet and calls `onSkeleton` before any image exists. The person mask is made on
+  demand (`L2KSourceFrame.makeSegmentation`, asked for by the depth image), then the depth and
+  colour images, then their packets and `onFrame`. The packets and their order are unchanged; the
+  skeleton only leaves earlier. A consumer that judges movement takes the skeleton from
+  `onSkeleton` and the images from `onFrame`.
+- *A 60 fps camera, 30 skeletons a second* (`UltraWideSource(captureRate: 60)`). The camera runs
+  at 60 frames a second in its widest format that fast; the body is still detected 30 times a
+  second, on every second frame (`L2KCameraView.usesFrame`), so the game's smoothing sees the
+  Kinect's rate. A frame of a 60 fps stream reaches the app sooner after its exposure. The fast
+  format can show less (`UltraWideSource.fastCameraKeepsView`); the app turns the faster camera on
+  by itself only where it shows the same ("Faster camera", `-l2kFastCamera 0|1`).
+
+Measured on an iPad Pro 11" (M2), front camera 1920×1440 (107° × 91° at both rates), nobody
+dancing, 2026-11-22, from the app's "Timing" line:
+
+| | picture old on arrival | Vision pose | skeleton handed on after the picture was taken |
+|---|---|---|---|
+| 30 fps, 0.9.2 order (mask first on every second frame) | 46–48 ms | 18–21 ms | 64–68 ms, +6–7 ms on every second frame |
+| 30 fps, skeleton first | 46–48 ms | 18–21 ms | 64–68 ms |
+| 60 fps, skeleton first | 28–32 ms | 17–23 ms | 44–52 ms |
+
+iPhone 17 Pro front camera: 60 ms on arrival at 30 fps in 1280×1280 (measured 2026-11-11); its
+60 fps format is 1024×768 with 84° × 68° instead of 84° × 84° — **not measured at 60 fps yet**.
+Not measured anywhere: the whole chain to the game's screen.

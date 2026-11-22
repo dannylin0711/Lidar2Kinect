@@ -130,13 +130,29 @@ public final class L2KSender {
     /// Send one frame: the skeleton, and the images the receiver asked for when they are given.
     /// `depth` is 320x240 packed pixels, `jpeg` a 640x480 JPEG.
     public func send(skeleton: l2k_skeleton_frame, depth: [UInt16]?, jpeg: Data?) {
+        transmit(skeleton: skeleton, withSkeleton: true, depth: depth, jpeg: jpeg)
+    }
+
+    /// Send a frame's skeleton alone, at once; its images follow with `sendImages` when they are made. The packets and
+    /// their order are those of `send` - the skeleton only leaves earlier.
+    public func send(skeleton: l2k_skeleton_frame) {
+        transmit(skeleton: skeleton, withSkeleton: true, depth: nil, jpeg: nil)
+    }
+
+    /// Send the images of a frame whose skeleton went out with `send(skeleton:)`.
+    public func sendImages(of skeleton: l2k_skeleton_frame, depth: [UInt16]?, jpeg: Data?) {
+        guard depth != nil || jpeg != nil else { return }
+        transmit(skeleton: skeleton, withSkeleton: false, depth: depth, jpeg: jpeg)
+    }
+
+    private func transmit(skeleton: l2k_skeleton_frame, withSkeleton: Bool, depth: [UInt16]?, jpeg: Data?) {
         queue.async {
             guard let connection = self.connection, self.status.state == .streaming else { return }
             var skeleton = skeleton
             let streams = self.status.streams
             var bytes = 0
             connection.batch {
-                if streams & L2K.streamSkeleton != 0 {
+                if withSkeleton, streams & L2K.streamSkeleton != 0 {
                     let n = l2k_encode_skeleton(&self.packet, L2K.maxDatagram, self.session, self.nextSeq(), &skeleton)
                     if n > 0 {
                         connection.send(content: Data(self.packet[0..<n]), completion: .idempotent)
@@ -159,7 +175,7 @@ public final class L2KSender {
                     }
                 }
             }
-            self.status.framesSent += 1
+            if withSkeleton { self.status.framesSent += 1 }
             self.status.bytesSent += bytes
         }
     }

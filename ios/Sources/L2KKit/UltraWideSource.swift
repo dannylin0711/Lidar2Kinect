@@ -11,6 +11,10 @@
 // the 16:9 ones cut the top and the bottom off), nothing that crops is on (stabilisation, Center Stage, zoom), and
 // Vision is given the whole frame.
 //
+// Latency: the skeleton leaves this source as soon as Vision has it; the person mask (for the depth image) is made
+// afterwards and only when an image is wanted. `captureRate` 60 runs the camera at 60 frames a second where a format
+// allows it and still detects on 30 of them: a picture is then younger when it arrives (measured: "Timing" line).
+//
 // Distances are Vision's estimate (it assumes a body height when it cannot measure one), so the skeleton is
 // right in shape and direction but only roughly in scale. Dance Evolution judges limb directions, not size.
 #if os(iOS)
@@ -34,8 +38,12 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     public var onFrame: ((L2KSourceFrame) -> Void)?
     public let lens: Lens
 
-    public init(lens: Lens = .rearUltraWide) {
+    /// - Parameter captureRate: frames per second asked of the camera, 30 or 60. 60: the format with the widest view
+    ///   among those that run that fast (it can show less than the 30 fps one; 30 again when the camera has none).
+    ///   The body is still detected 30 times a second, on the newest frame.
+    public init(lens: Lens = .rearUltraWide, captureRate: Double = 30) {
         self.lens = lens
+        self.captureRate = captureRate
         // The rear camera's mounting is known (it ran on a device); the front camera's differs between devices.
         mounting = L2KCameraMounting(adopts: lens == .front)
         super.init()
@@ -52,6 +60,12 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     private var formatLine = ""
     private var formatFieldOfView: Float = 0
     private var lastMask: CVPixelBuffer?
+    private var maskFrame = 0, maskMs = 0.0, masksMade = 0
+    private let captureRate: Double
+    private var runningRate = 30.0
+    private var lastUsedTime: Double?
+    private var used = 0, usedCount = 0, usedRate = 0.0
+    private var readyMs = 0.0
     private var bodyVisible = false
     private var trackingID: UInt32 = 0
     private var seenRate = JointSeenRate()
@@ -97,6 +111,14 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
         }
     }
 
+    /// Whether the lens's camera can run at 60 frames a second and still show what it shows at 30 (then the faster
+    /// camera only costs power). iPad Pro 11" (M2) front camera: yes (1920×1440, 107° × 91° at both rates); iPhone 17
+    /// Pro front camera: no (84° × 84° at 30, 84° × 68° at 60).
+    public static func fastCameraKeepsView(_ lens: Lens) -> Bool {
+        guard let device = camera(for: lens) else { return false }
+        return L2KCameraView.fastFormatKeepsView(formats(of: device).map(\.info))
+    }
+
     /// The device's 8-bit video formats with what matters for choosing among them.
     static func formats(of device: AVCaptureDevice) -> [(format: AVCaptureDevice.Format, info: L2KCameraFormat)] {
         let corrected = device.isGeometricDistortionCorrectionSupported
@@ -115,10 +137,10 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     }
 
     /// For troubleshooting: every format of the lens's camera and the one the source would pick.
-    public static func formatReport(for lens: Lens) -> [String] {
+    public static func formatReport(for lens: Lens, captureRate: Double = 30) -> [String] {
         guard let device = camera(for: lens) else { return ["\(lens.rawValue): no such camera"] }
         let all = formats(of: device)
-        let chosen = L2KCameraView.widestFormat(all.map(\.info))
+        let chosen = L2KCameraView.widestFormat(all.map(\.info), frameRate: captureRate)
         var lines = ["\(lens.rawValue): \(device.localizedName) (\(device.deviceType.rawValue)), \(all.count) formats"]
         var seen = Set<String>()
         for (index, entry) in all.enumerated() {
@@ -174,6 +196,8 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     private func configureAndRun(_ camera: AVCaptureDevice) {
         queue.async {
             self.device = camera
+            self.lastUsedTime = nil
+            self.runningRate = 30
             self.rotation = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: nil)
             if self.lens == .front {
                 // Center Stage pans and crops the front camera's picture to follow a person: the view must stay whole
@@ -205,7 +229,7 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             // The format that shows the most. The device stays locked until the session runs, so the session does not
             // put its own choice back.
             let all = Self.formats(of: camera)
-            var chosen = L2KCameraView.widestFormat(all.map(\.info))
+            var chosen = L2KCameraView.widestFormat(all.map(\.info), frameRate: self.captureRate)
             var forced = false
             if let wanted = Self.formatOverride?.lowercased().split(separator: "x").compactMap({ Int($0) }), wanted.count == 2 {
                 let same = all.indices.filter { all[$0].info.width == wanted[0] && all[$0].info.height == wanted[1] && all[$0].info.maxFrameRate >= 29.5 }
@@ -220,10 +244,16 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
                 // The ultra-wide lens bends straight lines; the correction gives the pinhole picture the maths assumes.
                 if camera.isGeometricDistortionCorrectionSupported { camera.isGeometricDistortionCorrectionEnabled = true }
                 let format = camera.activeFormat
-                // a Kinect delivers 30 frames per second
-                if format.videoSupportedFrameRateRanges.contains(where: { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }) {
-                    camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
-                    camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+                // A Kinect delivers 30 frames per second. A faster camera (captureRate 60) still gives 30 skeletons a
+                // second, each from a picture that took less time to get here.
+                func runs(_ rate: Double) -> Bool {
+                    format.videoSupportedFrameRateRanges.contains { $0.minFrameRate <= rate && $0.maxFrameRate >= rate - 0.5 }
+                }
+                let rate = self.captureRate > 30 && runs(self.captureRate) ? self.captureRate : 30
+                if runs(rate) {
+                    camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: Int32(rate.rounded()))
+                    camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: Int32(rate.rounded()))
+                    self.runningRate = rate
                 }
                 // Short exposures: a fast-moving hand smeared across the frame is a hand the detector loses.
                 // The camera raises its gain instead; a noisier picture costs the detector less than blur.
@@ -236,8 +266,13 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             if let chosen {
                 let info = all[chosen].info
                 self.formatFieldOfView = info.fieldOfView
-                self.formatLine = String(format: "Format %d×%d, %@ of %d formats: %.0f° × %.0f°", info.width, info.height,
-                                         forced ? "asked for (-l2kFormat)" : "the widest view", all.count, info.fieldOfView, info.verticalFieldOfView)
+                var how = forced ? "asked for (-l2kFormat)" : "the widest view"
+                if !forced, self.captureRate > 30 {
+                    how = self.runningRate > 30 ? String(format: "the widest view at %.0f frames a second", self.runningRate)
+                                                : String(format: "the widest view (no format runs at %.0f frames a second)", self.captureRate)
+                }
+                self.formatLine = String(format: "Format %d×%d at %.0f fps, %@ of %d formats: %.0f° × %.0f°", info.width, info.height,
+                                         self.runningRate, how, all.count, info.fieldOfView, info.verticalFieldOfView)
             }
             if let connection = output.connection(with: .video) {
                 // The picture as the camera sees it: not mirrored (a front camera's can be), not stabilised (that crops).
@@ -257,17 +292,27 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let image = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        // How old the picture already is when it arrives here (exposure to delivery).
-        let age = CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), CMSampleBufferGetPresentationTimeStamp(sampleBuffer)).seconds
-        if age.isFinite { delayMs = delayMs == 0 ? age * 1000 : delayMs * 0.9 + age * 100 }
+        let taken = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
         frames += 1
         rateCount += 1
         if rateStart == 0 { rateStart = now }
         if now - rateStart >= 1 {
             rate = Double(rateCount) / (now - rateStart)
+            usedRate = Double(usedCount) / (now - rateStart)
             rateStart = now
             rateCount = 0
+            usedCount = 0
         }
+        // A camera running faster than 30 frames a second: the body is detected on every second frame.
+        if taken.isFinite {
+            guard L2KCameraView.usesFrame(at: taken, last: lastUsedTime) else { return }
+            lastUsedTime = taken
+        }
+        used += 1
+        usedCount += 1
+        // How old the picture already is when it arrives here (exposure to delivery).
+        let age = CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), CMSampleBufferGetPresentationTimeStamp(sampleBuffer)).seconds
+        if age.isFinite { delayMs = delayMs == 0 ? age * 1000 : delayMs * 0.9 + age * 100 }
         let width = Float(CVPixelBufferGetWidth(image)), height = Float(CVPixelBufferGetHeight(image))
 
         // The camera's pinhole model: delivered with the frame, else from the format's field of view.
@@ -318,9 +363,21 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
         let visionStart = ProcessInfo.processInfo.systemUptime
         let joints = detector.detect(in: image, quadrant: quadrant, camera: camera)
         let poseMs = (ProcessInfo.processInfo.systemUptime - visionStart) * 1000
-        // The silhouette changes slowly compared with the pose: refresh the mask on every second frame.
-        if frames % 2 == 1 || lastMask == nil { lastMask = masker.mask(of: image) }
-        let visionMs = (ProcessInfo.processInfo.systemUptime - visionStart) * 1000
+        // The person mask is made when an image asks for it, which is after the skeleton has been handed on (the
+        // pipeline makes the skeleton first). The silhouette changes slowly compared with the pose: a mask is kept
+        // for two frames. Runs on this queue, inside `onFrame` below.
+        let index = used
+        let makeMask: () -> CVPixelBuffer? = { [self] in
+            if lastMask == nil || index - maskFrame >= 2 {
+                let start = ProcessInfo.processInfo.systemUptime
+                lastMask = masker.mask(of: image)
+                maskFrame = index
+                masksMade += 1
+                let ms = (ProcessInfo.processInfo.systemUptime - start) * 1000
+                maskMs = maskMs == 0 ? ms : maskMs * 0.8 + ms * 0.2
+            }
+            return lastMask
+        }
 
         var bodies: [l2k_src_body] = []
         if !joints.isEmpty {
@@ -337,8 +394,8 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             bodyVisible = false
         }
 
-        if frames % 8 == 1 {
-            var lines = [String(format: "Camera frames %d (%.0f/s), image %d×%d, roll quadrant %d", frames, rate, Int(width), Int(height), quadrant)]
+        if used % 8 == 1 {
+            var lines = [String(format: "Camera frames %d (%.0f/s, %.0f/s used), image %d×%d, roll quadrant %d", frames, rate, usedRate, Int(width), Int(height), quadrant)]
             lines.append(String(format: "Field of view %.0f° × %.0f° (%@)", 2 * atan(0.5 / camera.fxn) * 180 / .pi, 2 * atan(0.5 / camera.fyn) * 180 / .pi,
                                 intrinsicsFromFrame ? "from the camera" : "from the format"))
             if !formatLine.isEmpty { lines.append(formatLine) }
@@ -349,8 +406,8 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
                 // where Vision put each joint in the camera buffer (u right, v down), and how far away
                 lines.append("Joints u,v,m: " + joints.map { String(format: "%d:%.2f,%.2f,%.1f", $0.source, $0.u, $0.v, $0.depth) }.joined(separator: " "))
             }
-            lines.append(String(format: "Vision 2D + 3D pose: %d joints (%d from the picture, %d from the model), %.0f ms; with mask %.0f ms",
-                                joints.count, detector.lastSeen, detector.lastModelOnly, poseMs, visionMs)
+            lines.append(String(format: "Vision 2D + 3D pose: %d joints (%d from the picture, %d from the model), %.0f ms",
+                                joints.count, detector.lastSeen, detector.lastModelOnly, poseMs)
                          + (detector.lastError.map { " — \($0)" } ?? ""))
             if let layout = detector.lastLayout {
                 var line = String(format: "Picture for Vision %d×%d (camera image %.0f×%.0f in it), drawn in %.1f ms", layout.width, layout.height,
@@ -364,17 +421,26 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
                 }
                 lines.append(line)
             }
-            lines.append(String(format: "Timing: picture %.0f ms old on arrival, %.0f ms of work per frame, device %@", delayMs, workMs, Self.thermalName))
+            lines.append(String(format: "Timing: picture %.0f ms old on arrival, skeleton handed on %.0f ms after the picture was taken, %.0f ms of work per frame, device %@",
+                                delayMs, readyMs, workMs, Self.thermalName))
             lines.append(seenRate.summary)
             if !joints.isEmpty {
                 lines.append(String(format: "Body height %.2f m (%@)", detector.lastHeight, detector.lastHeightMeasured ? "measured" : "assumed"))
             }
-            lines.append("Person mask (Vision): \(lastMask == nil ? "none" : "present")" + (masker.lastError.map { " — \($0)" } ?? ""))
+            lines.append((masksMade == 0 ? "Person mask (Vision): not asked for"
+                                         : String(format: "Person mask (Vision): %@, made after the skeleton in %.0f ms", lastMask == nil ? "none" : "present", maskMs))
+                         + (masker.lastError.map { " — \($0)" } ?? ""))
             setStatus((joints.isEmpty ? "No body in view" : "Body seen") + " · \(lensName), no LiDAR", diagnostics: lines)
         }
 
-        onFrame?(L2KSourceFrame(timestamp: now, bodies: bodies, upCamera: up, camera: camera,
-                                depthMap: nil, segmentation: lastMask, image: image))
+        var frame = L2KSourceFrame(timestamp: now, bodies: bodies, upCamera: up, camera: camera, depthMap: nil, segmentation: nil, image: image)
+        frame.makeSegmentation = makeMask
+        // The picture's age when the skeleton leaves here (the pipeline hands it on within a millisecond).
+        if age.isFinite {
+            let ready = (age + ProcessInfo.processInfo.systemUptime - now) * 1000
+            readyMs = readyMs == 0 ? ready : readyMs * 0.9 + ready * 0.1
+        }
+        onFrame?(frame)
         let work = (ProcessInfo.processInfo.systemUptime - now) * 1000
         workMs = workMs == 0 ? work : workMs * 0.9 + work * 0.1
     }
