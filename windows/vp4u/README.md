@@ -77,6 +77,8 @@ video_width=480       ; the placeholder camera image (test mode, play video)
 video_height=480
 calibration_file=dev/nvram/stereo_cam.yml ; written so the game sees the cameras as calibrated
                       ;   (it raises CameraErrorUncalibrated 5-1503-1001 otherwise); "none" = never
+pin_d3d10warp=1       ; keep Windows' D3D10Warp.dll loaded: works around a crash in the game's video
+                      ;   playback (docs/vp4u-interface.md §6b); 0 = leave it alone
 ```
 
 The calibration file is a placeholder: the game only checks that it exists. It lives in the game's

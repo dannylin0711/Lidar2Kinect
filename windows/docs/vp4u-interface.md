@@ -187,14 +187,37 @@ inferred, so the game uses them), from estimates — **not compared with VisionP
 
 Phase 2 (a 30-joint stream from the phone, ARKit's own hand and face joints) replaces these.
 
+## 6b. Compatibility: D3D10Warp.dll (not part of the interface)
+
+Every game crash in this setup so far (five dumps in `%LOCALAPPDATA%\CrashDumps`, 16:34–20:34
+on 2026-11-26, read with `cdb` without symbols) has the same signature: access violation at
+`<Unloaded_D3D10Warp.dll>+0x1303a0`, called from a thread-pool thread (`ntdll!TpReleaseWork` →
+KERNELBASE). In each, `D3D10Warp.dll` (Windows' software rasteriser, WARP) had been loaded and
+unloaded four times, each time with `avrt.dll`, and Media Foundation was active (`mfplat`,
+`mfcore`, `MFReadWrite`, `mfmp4srcsnk`, two `msmpeg2vdec` H.264 decoder threads). So the game's
+video playback creates and releases a WARP device, and WARP is unloaded while one of its
+thread-pool callbacks is still queued. It happened in attract mode too (16:34), so it is not tied
+to the skeleton or to songs, only to how long videos play. Who creates the WARP device is not
+known: UnityPlayer and Mono are mapped by the loader outside the module list, so their frames have
+no names. `ee-config.xml` lists `d3d10warp.dll` among the hooked modules, which may play a part.
+
+Workaround, in the wrapper because it is the one DLL of ours loaded at boot: `vp4uPreboot` pins
+`D3D10Warp.dll` (`GetModuleHandleEx(PIN)`), so it is never unloaded and a late callback runs in
+valid code. `[vp4u] pin_d3d10warp=1` (default); the game log says `D3D10Warp.dll pinned`.
+
+**Confirmed (run 9, fifth build, fake sender):** two songs played through to the result screen,
+the second (`AllMusic/15/Basic`) for 2 min with 0 dropped frames; no crash, no new dump; the
+wrapper delivered 30.0 pose frames/s with one body for the whole 8½-minute session.
+
 ## 7. Open
 
 1. **Left / right.** §5's "+x is the player's right" rests on the camera crops; not yet seen in
    the game. Check: raise the right arm; the avatar should mirror it like a mirror would. If it
    is the wrong side, `mirror_x=1`.
-2. **Origin.** Camera height and the 2.3 m distance are inferred from the play-area box. Check:
-   standing 2.3 m from the phone, the game sees the player; stepping 0.5 m forward or back loses
-   them.
+2. **Origin.** Camera height and the 2.3 m distance were inferred from the play-area box.
+   **Confirmed with the fake sender (run 5):** the game's player calibration measured the figure
+   at (0.6, 0.0, 2.3) and (0.7, −0.2, 2.6), the middle of its play area. Still to see with a
+   person: stepping 0.5 m forward or back loses them.
 3. **Rate.** The original ran 60 fps (`CaptureFrameRate`); Kinect-shaped frames are 30 fps. The
    game filters joints itself (`Vp4uKalmanPose`); how judgement copes with 30 fps is not known.
 4. **Play video.** Nothing is recorded; what the game does when the file it named in
@@ -228,6 +251,28 @@ VFS"; no `CameraErrorUncalibrated`; the game went GameBoot → TestMode → Game
 NetworkConfirm → GameGaishuDemo (attract). Only `NetworkErrorServicesError 5-2002-0910` (no
 e-amusement server). The wrapper delivered empty pose frames at ~24.5/s for the whole run.
 `vp4uPreboot`'s first argument turned out to be the config's text (§1).
+
+Run 4 (fourth build): the game stalled in its own start-up — `ReflectionTypeLoadException` in
+`KAMUNITY.KamunityInstance.GetKamunityApiClass` (`Assembly.GetTypes`), nothing logged after it
+— before VisionPose's init, so before any table call. The wrapper's preboot and receiver ran
+normally. Not seen in any other run; the next start was fine. Cause not known.
+
+Run 5 (fourth build, `l2k_fake_sender` on the same PC: one figure, phone 2 m up tilted −24°,
+figure ~2.5 m away): VisionPose ready; the calibration file "present in the game's VFS" (kept
+from run 3); with the sender connected the wrapper delivered **30.0 pose frames/s, 1.00 bodies
+per frame**. The game went attract → `GameEntry` → card login and profile → its player
+calibration, which logged `GamePlayerCalib:result pos (0.6, 0.0, 2.3)` and `(0.7, -0.2, 2.6)`:
+the play-area centre is (0.55, 0, 2.30), and these are the figure's SpineBase as it sways
+(the probe sees x 0.38–0.72, y −0.23, z 2.30–2.70). **The game tracks the stream as a player.**
+
+Runs 6–8 (fourth build, fake sender, starting a song): **spice64 crashed each time**
+(19:57, 20:02, 20:11; Windows Application log): access violation `0xc0000005` in
+`D3D10Warp.dll_unloaded` at offset `0x1303a0` — code calling into the WARP software rasteriser
+after it was unloaded. It happens after the game's player calibration and **before**
+`GamePlaySceneController.GameStart`, whose first calls are `PrepareVideoCapture` /
+`StartVideoCapture` (the wrapper never logged them). The attract demo's game play runs fine. The
+wrapper has no Direct3D code; its threads only show the process freezing as it crashed. Cause
+not known yet; next: a crash dump with a stack.
 
 Also seen in run 2: a `NullReferenceException` in the
 game's own `Testmode4Unity.TMScene.Start` / `SuperFactorySetting.Start` (test mode), not in a

@@ -59,9 +59,26 @@ Third run: **the game boots to its attract demo with the wrapper** — the place
 Empty pose frames ~24.5/s throughout. `vp4uPreboot` gets the config's text, not a path; the log
 line no longer prints it (fourth build, not yet installed).
 
+Fifth run, with `l2k_fake_sender` on the same PC: 30.0 pose frames/s with one body each; the
+game took the figure through game entry into its **player calibration, which measured it at
+(0.6, 0.0, 2.3) and (0.7, −0.2, 2.6)** — the middle of its play area. The inferred origin and
+depth axis hold. (Run 4 had stalled once in the game's own start-up, a
+`ReflectionTypeLoadException` in Kamunity, before any wrapper call; not seen again.)
+
+Starting a song (runs 6–8): **spice64 crashes** after the player calibration, before the game's
+`GameStart` — access violation in `D3D10Warp.dll_unloaded`. The five crash dumps (read with `cdb`)
+are identical: a WARP thread-pool callback runs after the game's video playback released its WARP
+device and Windows unloaded the DLL; also seen in attract mode. Fifth build pins `D3D10Warp.dll`
+at preboot (`[vp4u] pin_d3d10warp=1`, `docs/vp4u-interface.md` §6b); probe checks it survives a
+`FreeLibrary`. **Confirmed in the game: two songs played to the result screen, no crash**, 30
+pose frames/s with one body throughout. (Played as guest: the play-video recording calls did not
+come; the DanceAround server plugin rejects a guest's `save_musicscore` — server side, not ours.)
+
 Not done / not verified:
 
-- A run with a sender (fake sender, then the iPhone app): player detection, left/right, origin. Open points 1–7 of
+- Left/right (open point 1) — the fake figure cannot show it, a person or the iPhone app can.
+- The play-video recording calls (only made for a card player, it seems).
+- The iPhone app. Open points 1–7 of
   `docs/vp4u-interface.md`, above all left/right and the origin.
 - Not with the real iPhone app.
 - No change to `shared/` or `ios/`. Phase 2 (30-joint stream, 60 fps, a `L2K_CONSUMER_*` value for

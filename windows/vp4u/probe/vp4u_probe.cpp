@@ -180,6 +180,18 @@ int main(int argc, char **argv) {
     /* the boot loader's call (ee-config.xml <vp4u>) */
     CHECK(preboot("/vpprops/visionposeforunityconfig.json", NULL, NULL) == 1);
 
+    /* pin_d3d10warp (default on): D3D10Warp.dll is loaded and survives a FreeLibrary */
+    CHECK(GetModuleHandleA("d3d10warp.dll") != NULL);
+    {
+        HMODULE w = LoadLibraryA("d3d10warp.dll");
+        CHECK(w != NULL);
+        if (w) {
+            FreeLibrary(w);
+            FreeLibrary(w); /* one more than we took: a pinned module stays */
+        }
+        CHECK(GetModuleHandleA("d3d10warp.dll") != NULL);
+    }
+
     vp4u_api_table wrong;
     memset(&wrong, 0, sizeof wrong);
     CHECK(get_table(VP4U_API_VERSION - 1, &wrong, (void *)on_log, NULL) == 0);

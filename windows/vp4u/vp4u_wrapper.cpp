@@ -34,6 +34,7 @@ struct Vp4uConfig {
     int video_w, video_h;
     int verbose;
     char calibration_file[MAX_PATH]; /* written so the game sees the cameras as calibrated; empty = never */
+    bool pin_d3d10warp;              /* keep D3D10Warp.dll loaded (crash workaround, docs/vp4u-interface.md §9) */
 };
 Vp4uConfig g_cfg;
 
@@ -81,6 +82,23 @@ void vp4u_config_load() {
      * (docs/vp4u-interface.md §4). */
     GetPrivateProfileStringA("vp4u", "calibration_file", "dev/nvram/stereo_cam.yml", g_cfg.calibration_file, sizeof g_cfg.calibration_file, ini);
     if (!_stricmp(g_cfg.calibration_file, "none")) g_cfg.calibration_file[0] = 0;
+    g_cfg.pin_d3d10warp = GetPrivateProfileIntA("vp4u", "pin_d3d10warp", 1, ini) != 0;
+}
+
+/* ---- compatibility: D3D10Warp.dll ----
+ * The game's video playback (Media Foundation) creates and releases a WARP (software) D3D device
+ * several times; on this Windows build D3D10Warp.dll can be unloaded while one of its thread-pool
+ * callbacks is still queued, which then runs into the unloaded code (every crash dump of the
+ * game: <Unloaded_D3D10Warp.dll>+0x1303a0 from a thread-pool thread). Keeping the DLL loaded
+ * for the life of the process makes the late callback harmless. Nothing to do with poses; it lives
+ * here because this is the one DLL of ours the game loads at boot. */
+const char *pin_d3d10warp() {
+    HMODULE m = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, L"d3d10warp.dll", &m)) {
+        if (!LoadLibraryExW(L"d3d10warp.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)) return "LOAD FAILED";
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, L"d3d10warp.dll", &m)) return "PIN FAILED";
+    }
+    return "pinned";
 }
 
 /* ---- the calibration placeholder ---- */
@@ -418,6 +436,7 @@ BOOL CALLBACK start_once(PINIT_ONCE, PVOID, PVOID *) {
     start(); /* the receiver: config_load, log_open, socket, thread; pins the module */
     log_fallback();
     vp4u_config_load();
+    if (g_cfg.pin_d3d10warp) log("vp4u: D3D10Warp.dll %s (pin_d3d10warp=1)", pin_d3d10warp());
     make_image();
     log("vp4u: no_sender %s, camera_height %s%.2f, phone_x %.2f, phone_z %.2f, phone_height %s%.2f, yaw %.1f, mirror_x %d, video %dx%d",
         g_cfg.no_sender == NO_SENDER_IDLE ? "idle" : "missing", g_cfg.camera_height_auto ? "auto/" : "", g_cfg.map.camera_height,
@@ -469,6 +488,7 @@ void *api_Initialize() {
     glog("module %s; ini %s (%s); log %s (%s)", module, config().ini_path, file_exists(config().ini_path) ? "found" : "not found",
          config().log_path[0] ? config().log_path : "off", log_is_open() ? "open" : "NOT OPEN");
     glog("%s", imports);
+    glog("D3D10Warp.dll %s", !g_cfg.pin_d3d10warp ? "not pinned (pin_d3d10warp=0)" : GetModuleHandleW(L"d3d10warp.dll") ? "pinned" : "NOT LOADED");
     return &g_instance;
 }
 
