@@ -12,12 +12,16 @@ Details: `windows/STATUS.md`, `windows/docs/vp4u-interface.md`, `windows/vp4u/RE
 - Phase 1 uses the stream as it is: the Kinect v1 skeleton is levelled with `up`, placed in the
   game's coordinates using the floor plane, and its 20 joints extended to the game's 30.
   **No change to `shared/` or `ios/`; golden packets unchanged.**
-- Verified with `l2k_fake_sender` only (30 fps, every frame inside the game's play area). Not run
-  in the game, not with the app.
-- **For phase 2 (both sides, later):** the game's skeleton has thumbs, hand tips, nose, eyes,
-  ears, and the original ran at 60 fps. Candidates: a new stream bit with a 30-joint body record
-  (ARKit has the hand and face joints), a 60 fps option, and a `consumer_kind` value for vp4u.
-  Additions only, so old peers are unaffected — but a decision for both sides.
+- **In the game with `l2k_fake_sender`** (spice2x, RTX 4070 Ti): the game's player calibration
+  measures the figure mid play area; two songs played to the result screen, 30 pose frames/s with
+  one body throughout. Game-side fixes on the way: the stereo-calibration file the game requires,
+  written into its VFS through `kamunity.dll`; a crash in the game's video playback worked around
+  by pinning `D3D10Warp.dll` (`windows/docs/vp4u-interface.md` §4, §6b). Not run with the app.
+- Rebased onto app 0.9.4: x86 ctest 4/4, x64 ctest 3/3, `test_l2k` 1136 checks on both.
+- **For the Apple side:** `ios/CLAUDE.md` (new) — what DanceAround relies on, how the app's Dance
+  Evolution fit / normalising options affect it, and the asks: a run with the app, a
+  `consumer_kind` for vp4u (to pick DanceAround's play area), 60 fps per receiver, a 30-joint body
+  stream. All additions, no packet change yet — a decision for both sides.
 
 ## 2026-11-10 — Windows side working in the game (Windows side)
 
