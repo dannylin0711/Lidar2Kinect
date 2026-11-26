@@ -30,8 +30,9 @@ static bool in_play_area(const vp4u_joint &j) {
 }
 
 /* Kinect frames of the synthetic figure seen by a phone `height` m up, tilted `tilt` degrees;
- * the mapper runs for a second first so its floor estimate settles. */
-static l2k_skeleton_frame kinect_frame(int players, float height, float tilt, double t) {
+ * the mapper runs for a second first so its floor estimate settles. `body` (optional) receives the
+ * mapper's 30-joint BODY frame of the last frame, as a sender with BODY would send it. */
+static l2k_skeleton_frame kinect_frame(int players, float height, float tilt, double t, l2k_body_frame *body = nullptr) {
     static l2k_mapper m;
     l2k_mapper_init(&m, NULL);
     l2k_skeleton_frame f;
@@ -42,6 +43,7 @@ static l2k_skeleton_frame kinect_frame(int players, float height, float tilt, do
         for (int p = 0; p < players; p++) l2k_synth_body_at(ti, p, players, height, tilt, &b[p]);
         l2k_mapper_map(&m, b, players, l2k_synth_up(tilt), 0, (uint64_t)(ti * 1e6), L2K_SOURCE_SYNTHETIC, &f);
     }
+    if (body) l2k_mapper_body_frame(&m, &f, body);
     return f;
 }
 
@@ -176,6 +178,37 @@ int main() {
         CHECK(vp4u::map_frame(f, p, out, 0) == 0);
         memset(&f.skeletons, 0, sizeof f.skeletons);
         CHECK(vp4u::map_frame(f, p, out, VP4U_MAX_BODIES) == 0);
+    }
+
+    /* the sender's BODY (the mapper's own 30 joints, the figure's face and hands from the source)
+     * against the same frame's SKELETON with the 10 joints placed here: same 20 skeleton joints, a
+     * plausible face either way */
+    {
+        static l2k_body_frame bf;
+        l2k_skeleton_frame f = kinect_frame(1, 2.0f, -24.0f, 3.0, &bf);
+        CHECK(bf.frame_number == f.frame_number);
+        vp4u_body a[VP4U_MAX_BODIES], b[VP4U_MAX_BODIES];
+        int na = vp4u::map_frame(f, p, a, VP4U_MAX_BODIES);
+        int nb = vp4u::map_body_frame(bf, p, b, VP4U_MAX_BODIES);
+        CHECK(na == 1 && nb == 1);
+        check_body(b[0], p, 0.08f);
+        CHECK(in_play_area(b[0].joints[VP4U_SPINE_BASE]));
+        CHECK(a[0].tracking_id == b[0].tracking_id);
+        const int shared_joints[] = {VP4U_SPINE_BASE, VP4U_SPINE_MID, VP4U_HEAD, VP4U_SHOULDER_LEFT, VP4U_ELBOW_LEFT, VP4U_WRIST_LEFT,
+                                     VP4U_HAND_LEFT, VP4U_SHOULDER_RIGHT, VP4U_ELBOW_RIGHT, VP4U_WRIST_RIGHT, VP4U_HAND_RIGHT, VP4U_HIP_LEFT,
+                                     VP4U_KNEE_LEFT, VP4U_ANKLE_LEFT, VP4U_FOOT_LEFT, VP4U_HIP_RIGHT, VP4U_KNEE_RIGHT, VP4U_ANKLE_RIGHT,
+                                     VP4U_FOOT_RIGHT, VP4U_SPINE_SHOULDER};
+        for (int j : shared_joints) {
+            CHECK(NEAR(a[0].joints[j].x, b[0].joints[j].x, 1e-4f));
+            CHECK(NEAR(a[0].joints[j].y, b[0].joints[j].y, 1e-4f));
+            CHECK(NEAR(a[0].joints[j].z, b[0].joints[j].z, 1e-4f));
+        }
+        /* the face from the source stays near the placed one (the figure's head turns at most 20 deg) */
+        for (int j = VP4U_NOSE; j <= VP4U_EAR_RIGHT; j++) {
+            float d = sqrtf(powf(a[0].joints[j].x - b[0].joints[j].x, 2) + powf(a[0].joints[j].y - b[0].joints[j].y, 2) +
+                            powf(a[0].joints[j].z - b[0].joints[j].z, 2));
+            CHECK(d < 0.12f);
+        }
     }
 
     /* levelling itself */

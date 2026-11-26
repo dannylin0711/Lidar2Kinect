@@ -6,6 +6,25 @@ KDM-2016021900 with spice2x 2026-10-30 in `F:\BEMANI\DEA\KDM-2016021900\contents
 DanceAround UDN-2022062801 dump in `F:\BEMANI\UDN-001-2022062801`, a spice2x runner for it in
 `F:\下載\runner-dar-spice-`; GPU RTX 4070 Ti.
 
+## 2026-11-26 (2) — vp4u adopts kind 5, rate 60 and BODY (app 0.10.0)
+
+Following `windows/AGENT_PROMPT.md` "DanceAround: what the Apple side added":
+
+- **Core:** the receiver asks each consumer for its rate (`hub_rate()`, CONFIG `rate`; the Kinect
+  side says 0 = 30) and decodes BODY into `hub_body()` (the Kinect side never asks for it). The
+  summary line counts body frames. Rate and stream changes are sent at once.
+- **vp4u:** `init_module(…, L2K_CONSUMER_VP4U, …)`; `[vp4u] rate=60`, `body=1`; asks for SKELETON +
+  BODY. The dispatcher sends each frame once, from its BODY, or from its SKELETON through
+  `l2k_body_frame_from_skeleton` when the sender offers no BODY or the BODY has not come 8 ms after
+  its SKELETON (a lost datagram); frames are paired by `frame_number`, detected by arrival, so a
+  restarted sender is followed. The game log says which source feeds it. `vp4u_map` now maps
+  `l2k_body_frame` (level, yaw, place, mirror); its derived-joint code is gone (it is `shared/`'s).
+- Verified: x64 ctest 4/4 — `test_l2k` 1470 checks with MSVC (x86 too), `test_vp4u` 320 checks
+  (new: the sender's BODY against SKELETON — the 20 skeleton joints identical, the face within
+  12 cm), `vp4u_probe` **60.0 pose frames/s from BODY**, all 30 joints valid, every frame in the
+  play area, `vp4u_probe_skeleton` (`body=0`) 60.0 from SKELETON; x86 ctest 4/4. Installed in
+  Danny's game folder. **Not yet run in the game at 60, not with the app.**
+
 ## 2026-11-26 — DanceAround: vp4u wrapper, phase 1 (builds, tests pass, not run in the game)
 
 Why: DanceAround's camera pipeline (two RealSense + NEXT-SYSTEM VisionPose on TensorRT 7.2.1)

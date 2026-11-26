@@ -174,8 +174,14 @@ centred on the play area lands in the middle of the game's play area.
 
 ## 6. Derived joints
 
-Kinect v1 has 20 joints; the vp4u body has 30. The replacement places the others (marked
-inferred, so the game uses them), from estimates — **not compared with VisionPose output**:
+Since app 0.10.0 the sender sends the 30 joints itself (BODY, `docs/02` §4b): nose, eyes and ears
+from the camera (Vision 2D or ARKit) where it sees them, the rest placed with the formulas below,
+which moved into `shared/` (`l2k_mapper_body_frame`, `l2k_body_frame_from_skeleton`). The
+replacement uses a frame's BODY, and for a sender without BODY (or a lost BODY datagram) places the
+ten joints from the SKELETON frame with the same shared code.
+
+Kinect v1 has 20 joints; the vp4u body has 30. The ten others are placed (marked inferred, so the
+game uses them) from estimates — **not compared with VisionPose output**:
 
 | Joint | From |
 |---|---|
@@ -185,7 +191,7 @@ inferred, so the game uses them), from estimates — **not compared with VisionP
 | Thumb | Wrist + 0.8 × (Hand − Wrist) + 3 cm forward |
 | Nose, eyes, ears | Head ± fixed offsets along the body's forward / sideways / up axes (forward from the shoulder line) |
 
-Phase 2 (a 30-joint stream from the phone, ARKit's own hand and face joints) replaces these.
+Hand tips and thumbs are still placed this way on every source (no source tracks them yet).
 
 ## 6b. Compatibility: D3D10Warp.dll (not part of the interface)
 
@@ -218,8 +224,9 @@ wrapper delivered 30.0 pose frames/s with one body for the whole 8½-minute sess
    **Confirmed with the fake sender (run 5):** the game's player calibration measured the figure
    at (0.6, 0.0, 2.3) and (0.7, −0.2, 2.6), the middle of its play area. Still to see with a
    person: stepping 0.5 m forward or back loses them.
-3. **Rate.** The original ran 60 fps (`CaptureFrameRate`); Kinect-shaped frames are 30 fps. The
-   game filters joints itself (`Vp4uKalmanPose`); how judgement copes with 30 fps is not known.
+3. **Rate.** The original ran 60 fps (`CaptureFrameRate`). The replacement now asks for 60 (CONFIG
+   `rate`); whether a phone delivers 60 depends on its source (`ios/CLAUDE.md`). Not yet seen in
+   the game at 60.
 4. **Play video.** Nothing is recorded; what the game does when the file it named in
    `PrepareVideoRecording` does not exist after `FinalizeVideoRecording` is not known.
 5. **Error 11 / 12** recovery (§4) with `no_sender=missing`.

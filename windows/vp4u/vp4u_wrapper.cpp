@@ -3,10 +3,13 @@
  * the L2K1 receiver instead of two RealSense cameras + VisionPose.
  *
  * Threads:
- *  - receiver (core/l2kw_receiver.cpp): socket; hands every new skeleton frame to hub_skeleton().
- *  - dispatcher (here): calls the game's callbacks. A new skeleton frame -> one pose frame; no
- *    fresh frame for 250 ms (or no sender) -> an empty pose frame every 33 ms so the stream never
- *    stops; camera preview / calibration preview frames at 30 fps while open.
+ *  - receiver (core/l2kw_receiver.cpp): socket; hands every new SKELETON frame to hub_skeleton()
+ *    and every new BODY frame (30 joints) to hub_body(). It asks the sender (CONFIG) for SKELETON +
+ *    BODY at [vp4u] rate (60) as consumer kind L2K_CONSUMER_VP4U.
+ *  - dispatcher (here): calls the game's callbacks. Each sender frame -> one pose frame, from its
+ *    BODY, or from its SKELETON when the sender offers no BODY or the BODY was lost; no fresh frame
+ *    for 250 ms (or no sender) -> an empty pose frame every 33 ms so the stream never stops; camera
+ *    preview / calibration preview frames at 30 fps while open.
  *  - the game's threads: call the table functions.
  * Callbacks run under g_cb_cs, and the Stop / Close functions take g_cb_cs before clearing a
  * callback, so a callback is never called after its Stop returned (the C# delegate may be
@@ -34,7 +37,9 @@ struct Vp4uConfig {
     int video_w, video_h;
     int verbose;
     char calibration_file[MAX_PATH]; /* written so the game sees the cameras as calibrated; empty = never */
-    bool pin_d3d10warp;              /* keep D3D10Warp.dll loaded (crash workaround, docs/vp4u-interface.md §9) */
+    bool pin_d3d10warp;              /* keep D3D10Warp.dll loaded (crash workaround, docs/vp4u-interface.md §6b) */
+    int rate;                        /* skeleton / body frames a second asked of the sender (CONFIG rate); 0 = its default, 30 */
+    bool body;                       /* ask for the 30-joint BODY stream (else every body is made from SKELETON here) */
 };
 Vp4uConfig g_cfg;
 
@@ -83,6 +88,10 @@ void vp4u_config_load() {
     GetPrivateProfileStringA("vp4u", "calibration_file", "dev/nvram/stereo_cam.yml", g_cfg.calibration_file, sizeof g_cfg.calibration_file, ini);
     if (!_stricmp(g_cfg.calibration_file, "none")) g_cfg.calibration_file[0] = 0;
     g_cfg.pin_d3d10warp = GetPrivateProfileIntA("vp4u", "pin_d3d10warp", 1, ini) != 0;
+    /* the cabinet's cameras ran at 60 (visionposeforunityconfig.json CaptureFrameRate) */
+    g_cfg.rate = GetPrivateProfileIntA("vp4u", "rate", 60, ini);
+    if (g_cfg.rate < 0 || g_cfg.rate > 120) g_cfg.rate = 60;
+    g_cfg.body = GetPrivateProfileIntA("vp4u", "body", 1, ini) != 0;
 }
 
 /* ---- compatibility: D3D10Warp.dll ----
@@ -263,11 +272,18 @@ CRITICAL_SECTION g_state_cs; /* frame, presence */
 CRITICAL_SECTION g_cb_cs;    /* the game's callbacks; held while calling them */
 HANDLE g_wake;               /* auto-reset: a new frame arrived or a callback was set */
 bool g_present;
+uint32_t g_sender_caps; /* L2K_STREAM_* the sender offers (HELLO) */
 char g_sender_name[L2K_NAME_SIZE + 1];
-l2k_skeleton_frame g_frame;
-uint32_t g_frame_seq;
+l2k_skeleton_frame g_frame; /* the newest SKELETON frame */
+uint32_t g_frame_seq;       /* +1 per SKELETON frame received */
 uint64_t g_frame_time;
+l2k_body_frame g_body;      /* the newest BODY frame */
+uint32_t g_body_seq;        /* +1 per BODY frame received */
+uint64_t g_body_time;
 char g_config_path[MAX_PATH];
+
+/* How long a SKELETON frame waits for its BODY (sent right after it) before it is used on its own. */
+const uint64_t kBodyWaitUs = 8000;
 
 struct Callbacks {
     vp4u_pose_cb pose;
@@ -310,7 +326,7 @@ void make_image() {
 
 /* statistics for the 5 s summary */
 struct Stats {
-    unsigned frames, empty, bodies, preview, mapped_bad;
+    unsigned frames, empty, bodies, preview, from_body, from_skeleton;
 } g_st;
 
 bool g_initialized;
@@ -355,35 +371,88 @@ bool read_camera_height(const char *path, float *out) {
 }
 
 /* ---- dispatcher ---- */
+/* One pose frame per sender frame. With a sender that offers BODY, a frame is used when its BODY
+ * arrives (straight after its SKELETON); a SKELETON whose BODY has not come within kBodyWaitUs (a
+ * lost datagram) is used on its own, its 30 joints made by l2k_body_frame_from_skeleton. Frames are
+ * paired by frame_number but detected by arrival counters, so a sender that restarts its numbering
+ * is followed at once. */
 DWORD WINAPI dispatcher_main(void *) {
-    uint32_t last_seq = 0;
-    uint64_t last_pose = 0, last_preview = 0, last_report = now_us();
+    uint32_t last_skel_seq = 0, last_body_seq = 0, sent_frame = 0;
+    bool skel_pending = false, have_sent = false;
+    int last_source = -1; /* 0 SKELETON, 1 BODY: logged when it changes */
+    uint64_t last_pose = 0, last_preview = 0, last_report = now_us(), skel_time = 0, body_time = 0;
+    static l2k_skeleton_frame skel; /* this thread only */
+    static l2k_body_frame body, made;
     vp4u_body bodies[VP4U_MAX_BODIES];
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
     while (!g_quit) {
-        WaitForSingleObject(g_wake, 10);
+        WaitForSingleObject(g_wake, skel_pending ? 2 : 10);
         uint64_t now = now_us();
 
+        bool body_new = false;
         EnterCriticalSection(&g_state_cs);
-        bool fresh = g_frame_seq != last_seq;
-        l2k_skeleton_frame f;
-        if (fresh) f = g_frame;
-        uint64_t frame_time = g_frame_time;
+        if (g_frame_seq != last_skel_seq) {
+            skel = g_frame;
+            skel_time = g_frame_time;
+            last_skel_seq = g_frame_seq;
+            skel_pending = true;
+        }
+        if (g_body_seq != last_body_seq) {
+            body = g_body;
+            body_time = g_body_time;
+            last_body_seq = g_body_seq;
+            body_new = true;
+        }
         bool present = g_present;
-        last_seq = g_frame_seq;
+        bool expect_body = present && g_cfg.body && (g_sender_caps & L2K_STREAM_BODY);
         LeaveCriticalSection(&g_state_cs);
+
+        const l2k_body_frame *use = NULL;
+        uint64_t use_time = 0;
+        int source = 0;
+        if (body_new) {
+            if (!(have_sent && body.frame_number == sent_frame)) {
+                use = &body;
+                use_time = body_time;
+                source = 1;
+            }
+            if (skel_pending && skel.frame_number == body.frame_number) skel_pending = false; /* its body came */
+        }
+        if (!use && skel_pending) {
+            if (have_sent && skel.frame_number == sent_frame) {
+                skel_pending = false; /* already sent from its body */
+            } else if (!expect_body || now - skel_time > kBodyWaitUs) {
+                l2k_body_frame_from_skeleton(&skel, &made);
+                use = &made;
+                use_time = skel_time;
+                source = 0;
+                skel_pending = false;
+            }
+        }
+        if (use) {
+            sent_frame = use->frame_number;
+            have_sent = true;
+        }
+        uint64_t data_time = skel_time > body_time ? skel_time : body_time;
 
         EnterCriticalSection(&g_cb_cs);
         if (g_cb.pose) {
-            if (fresh) {
-                int n = vp4u::map_frame(f, g_cfg.map, bodies, VP4U_MAX_BODIES);
-                g_cb.pose(g_cb.pose_ctx, frame_time, bodies, n, bodies, 0, bodies, 0, bodies, 0, &g_image, &g_image);
+            if (use) {
+                int n = vp4u::map_body_frame(*use, g_cfg.map, bodies, VP4U_MAX_BODIES);
+                g_cb.pose(g_cb.pose_ctx, use_time, bodies, n, bodies, 0, bodies, 0, bodies, 0, &g_image, &g_image);
                 g_st.frames++;
                 g_st.bodies += (unsigned)n;
                 if (n == 0) g_st.empty++;
+                if (source) g_st.from_body++;
+                else g_st.from_skeleton++;
+                if (source != last_source) {
+                    glog(source ? "pose frames from the sender's BODY stream (30 joints)"
+                                : "pose frames from SKELETON (the 10 extra joints placed on this PC)");
+                    last_source = source;
+                }
                 last_pose = now;
-            } else if (now - last_pose >= 33333 && (!present || now - frame_time > 250000)) {
+            } else if (now - last_pose >= 33333 && (!present || now - data_time > 250000)) {
                 g_cb.pose(g_cb.pose_ctx, now, bodies, 0, bodies, 0, bodies, 0, bodies, 0, &g_image, &g_image);
                 g_st.frames++;
                 g_st.empty++;
@@ -418,9 +487,9 @@ DWORD WINAPI dispatcher_main(void *) {
         if (now - last_report >= 5000000) {
             if (g_st.frames || g_st.preview) {
                 double s = (double)(now - last_report) / 1e6;
-                log("game: last %.0f s: pose frames %.1f/s (%u empty), bodies per frame %.2f, preview frames %.1f/s, sender %s", s,
-                    g_st.frames / s, g_st.empty, g_st.frames ? (double)g_st.bodies / g_st.frames : 0.0, g_st.preview / s,
-                    present ? "present" : "absent");
+                log("game: last %.0f s: pose frames %.1f/s (%u empty; %u from BODY, %u from SKELETON), bodies per frame %.2f, preview frames %.1f/s, sender %s",
+                    s, g_st.frames / s, g_st.empty, g_st.from_body, g_st.from_skeleton, g_st.frames ? (double)g_st.bodies / g_st.frames : 0.0,
+                    g_st.preview / s, present ? "present" : "absent");
             }
             memset(&g_st, 0, sizeof g_st);
             last_report = now;
@@ -438,10 +507,10 @@ BOOL CALLBACK start_once(PINIT_ONCE, PVOID, PVOID *) {
     vp4u_config_load();
     if (g_cfg.pin_d3d10warp) log("vp4u: D3D10Warp.dll %s (pin_d3d10warp=1)", pin_d3d10warp());
     make_image();
-    log("vp4u: no_sender %s, camera_height %s%.2f, phone_x %.2f, phone_z %.2f, phone_height %s%.2f, yaw %.1f, mirror_x %d, video %dx%d",
+    log("vp4u: no_sender %s, camera_height %s%.2f, phone_x %.2f, phone_z %.2f, phone_height %s%.2f, yaw %.1f, mirror_x %d, video %dx%d, rate %d, body %d",
         g_cfg.no_sender == NO_SENDER_IDLE ? "idle" : "missing", g_cfg.camera_height_auto ? "auto/" : "", g_cfg.map.camera_height,
         g_cfg.map.phone_x, g_cfg.map.phone_z, g_cfg.map.phone_height > 0 ? "" : "auto/", g_cfg.map.phone_height > 0 ? g_cfg.map.phone_height : g_cfg.map.default_phone_height,
-        g_cfg.map.yaw_deg, g_cfg.map.mirror_x, g_cfg.video_w, g_cfg.video_h);
+        g_cfg.map.yaw_deg, g_cfg.map.mirror_x, g_cfg.video_w, g_cfg.video_h, g_cfg.rate, g_cfg.body);
     HANDLE t = CreateThread(NULL, 0, dispatcher_main, NULL, 0, NULL);
     if (t) CloseHandle(t);
     else log("vp4u: CreateThread (dispatcher) failed (%lu)", GetLastError());
@@ -657,10 +726,16 @@ namespace l2kw {
 void hub_sender_present(bool present, const SenderInfo &info) {
     EnterCriticalSection(&g_state_cs);
     g_present = present;
+    g_sender_caps = present ? info.caps : 0;
     snprintf(g_sender_name, sizeof g_sender_name, "%s", info.name);
     LeaveCriticalSection(&g_state_cs);
     SetEvent(g_wake);
-    glog("sender \"%s\" %s", info.name, present ? "connected" : "gone");
+    if (present)
+        glog("sender \"%s\" connected (offers %s; asking for %s at %d frames/s)", info.name,
+             (info.caps & L2K_STREAM_BODY) ? "BODY" : "SKELETON only", g_cfg.body ? "SKELETON + BODY" : "SKELETON",
+             g_cfg.rate ? g_cfg.rate : L2K_DEFAULT_RATE);
+    else
+        glog("sender \"%s\" gone", info.name);
 }
 
 void hub_skeleton(const l2k_skeleton_frame &frame) {
@@ -672,10 +747,20 @@ void hub_skeleton(const l2k_skeleton_frame &frame) {
     SetEvent(g_wake);
 }
 
+void hub_body(const l2k_body_frame &frame) {
+    EnterCriticalSection(&g_state_cs);
+    g_body = frame;
+    g_body_seq++;
+    g_body_time = now_us();
+    LeaveCriticalSection(&g_state_cs);
+    SetEvent(g_wake);
+}
+
 void hub_depth(const uint16_t *, uint32_t) {}
 void hub_color(const uint8_t *, uint32_t) {}
 void hub_tick() {}
-uint32_t hub_wanted() { return L2K_STREAM_SKELETON; }
+uint32_t hub_wanted() { return L2K_STREAM_SKELETON | (g_cfg.body ? L2K_STREAM_BODY : 0); }
+uint8_t hub_rate() { return (uint8_t)g_cfg.rate; }
 uint32_t hub_skeleton_flags() { return 0; }
 
 } // namespace l2kw
@@ -750,7 +835,8 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
         InitializeCriticalSection(&g_log_cs);
-        init_module(module, L2K_CONSUMER_UNKNOWN, "vp4u visionposewrapper.dll (DanceAround)");
+        /* consumer kind 5: the app then uses DanceAround's play area (l2k_game_of_consumer) */
+        init_module(module, L2K_CONSUMER_VP4U, "vp4u visionposewrapper.dll (DanceAround)");
     }
     return TRUE;
 }

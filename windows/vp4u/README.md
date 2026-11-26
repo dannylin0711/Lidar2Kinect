@@ -5,9 +5,12 @@ skeleton from the Lidar2Kinect app over the network instead of from two RealSens
 VisionPose, so it needs no RealSense, no CUDA / TensorRT and no VisionPose licence — and runs on any
 GPU. The interface and the reasons behind every choice: `../docs/vp4u-interface.md`.
 
-Phase 1 (this): the app's existing stream (Kinect v1 skeleton, 20 joints, 30 fps) is levelled,
-placed in the game's coordinates and extended to the game's 30 joints. Nothing changes on the
-phone or in `shared/`.
+The wrapper tells the app it is DanceAround's receiver (`consumer_kind` 5: the app uses
+DanceAround's play area) and asks for 60 frames a second of SKELETON + BODY, the 30-joint body in
+the game's own joint order (`../../docs/02-wire-protocol.md` §4b). Each frame's BODY is levelled,
+placed in the game's coordinates and passed on; a sender without BODY (an app before 0.10.0) or a
+lost BODY datagram falls back to the SKELETON frame with the ten extra joints placed from it
+(`l2k_body_frame_from_skeleton` in `shared/`).
 
 ## Build and test
 
@@ -21,8 +24,9 @@ ctest --test-dir build/vp4u -C Release --output-on-failure
 
 Output in `build/vp4u/bin/Release/`: `visionposewrapper.dll`, `vp4u_probe.exe`, `test_vp4u.exe`,
 `l2k_fake_sender.exe`, `l2k_dump.exe`. Tests: `l2k` (shared golden packets), `vp4u_map` (the
-mapping: axes, levelling, floor, play area, derived joints), `vp4u_probe` (the DLL driven like the
-game, fed by `l2k_fake_sender` over loopback).
+mapping: axes, levelling, floor, play area, BODY against SKELETON), `vp4u_probe` (the DLL driven
+like the game, fed by `l2k_fake_sender` over loopback: 60 frames a second from BODY) and
+`vp4u_probe_skeleton` (the same with `body=0`: from SKELETON).
 
 ## Install
 
@@ -31,14 +35,38 @@ In the game folder (the one with `spice64.exe`):
 1. Rename `game\dancearound_data\plugins\x86_64\visionposewrapper.dll` to
    `visionposewrapper.dll.orig`.
 2. Copy `visionposewrapper.dll` (and optionally an `l2k.ini`, below) into that folder.
-3. Allow `spice64.exe` through the Windows firewall for UDP 24810.
+3. Open UDP port 24810 in Windows Firewall for the game (below).
 
 `ee-config.xml` can stay as it is: the loader still loads the CUDA / VisionPose DLLs it lists, but
-nothing calls them. Not yet tried in the game — if the loader fails on one of them, removing the
-VisionPose / CUDA / RealSense lines from `<vp4u><load_libraries>` (keeping the
-`visionposewrapper.dll` line) should be the fix.
+nothing calls them (seen in the game).
 
 To go back: delete the new DLL and rename `.orig` back.
+
+### Firewall: UDP 24810
+
+The app sends its first packet (HELLO) to the PC, so the game must be allowed to receive on UDP
+24810. Windows Firewall blocks inbound traffic for a program without an allow rule, and then the
+phone looks as if it sends nothing: the app gets no answer and `l2k.log` shows no `receiver:` line
+at all. One rule, for the game's `spice64.exe` only, on private networks — in a PowerShell **run as
+administrator**, with the path of your game folder:
+
+```powershell
+New-NetFirewallRule -DisplayName "Lidar2Kinect (DanceAround spice2x)" -Direction Inbound -Action Allow -Protocol UDP -LocalPort 24810 -Program "F:\BEMANI\UDN-001-2022062801\spice64.exe" -Profile Private
+```
+
+- The PC's network must be a private network (Settings → Network & internet → the connection →
+  Private), or the rule does not apply; `Get-NetConnectionProfile` shows it.
+- A different `port` in `l2k.ini` needs the same number here.
+- The game need not be restarted after adding the rule.
+- Check: `Get-NetFirewallRule -DisplayName "Lidar2Kinect (DanceAround spice2x)"`. To remove it:
+  `Remove-NetFirewallRule -DisplayName "Lidar2Kinect (DanceAround spice2x)"`.
+
+On the iPhone, the app also needs **Settings → Privacy & Security → Local Network → Lidar2Kinect**
+on; without it iOS stops the app from sending to the PC. The app finds the PC by Bonjour
+(`_l2k._udp`, the computer's name) or by its address on the network.
+
+When it works, the game log has `l2k: sender "…" connected (offers BODY; …)` and `l2k.log` a
+`receiver: last 5 s: …` line every 5 s.
 
 ## Where to put the phone
 
@@ -79,6 +107,10 @@ calibration_file=dev/nvram/stereo_cam.yml ; written so the game sees the cameras
                       ;   (it raises CameraErrorUncalibrated 5-1503-1001 otherwise); "none" = never
 pin_d3d10warp=1       ; keep Windows' D3D10Warp.dll loaded: works around a crash in the game's video
                       ;   playback (docs/vp4u-interface.md §6b); 0 = leave it alone
+rate=60               ; skeleton / body frames a second asked of the app (0 = its default, 30);
+                      ;   the cabinet's cameras ran at 60
+body=1                ; ask for the 30-joint BODY stream; 0 = SKELETON only, the ten extra joints
+                      ;   placed on this PC
 ```
 
 The calibration file is a placeholder: the game only checks that it exists. It lives in the game's

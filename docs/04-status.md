@@ -2,6 +2,17 @@
 
 Newest first. Each side appends its own entries; the Windows side also keeps `windows/STATUS.md`.
 
+## 2026-11-26 (3) — vp4u takes kind 5, rate 60, BODY (Windows side)
+
+- `windows/vp4u` now sends `consumer_kind` 5 and CONFIG `rate` 60 and asks for SKELETON + BODY; each
+  frame comes from its BODY, or from its SKELETON through `l2k_body_frame_from_skeleton` (no BODY
+  offered, or the BODY lost). The core asks each consumer for its rate (Kinect side: 0) and decodes
+  BODY. **No change to `shared/`.** Details: `windows/STATUS.md`.
+- Verified on Windows: `shared/` builds with MSVC x86 and x64, `test_l2k` 1470 checks on both; with
+  `l2k_fake_sender`, 60.0 pose frames/s from BODY (and from SKELETON with `body=0`), all 30 joints,
+  every frame in the play area; x86 ctest 4/4, x64 ctest 4/4. Not yet in the game at 60, not with
+  the app.
+
 ## 2026-11-26 (2) — DanceAround on the Apple side: its game, 60 frames a second, 30 joints; app 0.10.0 (Apple side)
 
 Danny: "let's finish the l2k of the dar support on ios" — asks 2–4 of `ios/CLAUDE.md`. **`shared/` and the

@@ -86,10 +86,12 @@ struct SenderInfo {
 /* receiver -> hub */
 void hub_sender_present(bool present, const SenderInfo &info);
 void hub_skeleton(const l2k_skeleton_frame &frame);
+void hub_body(const l2k_body_frame &frame);                    /* 30 joints; only if the hub asked for L2K_STREAM_BODY */
 void hub_depth(const uint16_t *pixels, uint32_t frame_number); /* 320x240 */
 void hub_color(const uint8_t *bgrx, uint32_t frame_number);    /* 640x480 x 4 */
 void hub_tick();       /* called every few ms by the receiver: frame-end liveness, empty frames, summaries */
 uint32_t hub_wanted(); /* L2K_STREAM_* the consumer currently needs */
+uint8_t hub_rate();    /* skeleton / body frames a second to ask for in CONFIG; 0 = the sender's default (30) */
 uint32_t hub_skeleton_flags();
 
 } // namespace l2kw

@@ -141,18 +141,21 @@ static std::string exe_dir() {
 }
 
 int main(int argc, char **argv) {
-    double seconds = 10;
+    double seconds = 10, min_rate = 55; /* the DLL asks for 60 frames a second by default */
     int players = 1;
     bool check = false;
-    std::string sender, dll = exe_dir() + "visionposewrapper.dll";
+    std::string sender, dll = exe_dir() + "visionposewrapper.dll", expect_source = "body";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--check")) check = true;
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) seconds = atof(argv[++i]);
         else if (!strcmp(argv[i], "--players") && i + 1 < argc) players = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--sender") && i + 1 < argc) sender = argv[++i];
         else if (!strcmp(argv[i], "--dll") && i + 1 < argc) dll = argv[++i];
+        else if (!strcmp(argv[i], "--min-rate") && i + 1 < argc) min_rate = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--expect-source") && i + 1 < argc) expect_source = argv[++i];
         else {
-            fprintf(stderr, "usage: vp4u_probe [--check] [-t seconds] [--players n] [--sender l2k_fake_sender.exe] [--dll visionposewrapper.dll]\n");
+            fprintf(stderr, "usage: vp4u_probe [--check] [-t seconds] [--players n] [--sender l2k_fake_sender.exe] [--dll visionposewrapper.dll]\n"
+                            "                  [--min-rate frames/s (55)] [--expect-source body|skeleton]\n");
             return 2;
         }
     }
@@ -298,11 +301,22 @@ int main(int argc, char **argv) {
             printf("sender: %.1f pose frames/s, %.0f%% with a body, %.0f%% of those in the play area, %.0f%% with all 30 joints\n", rate,
                    s.frames ? 100.0 * s.with_body / s.frames : 0.0, s.with_body ? 100.0 * s.in_area / s.with_body : 0.0,
                    s.with_body ? 100.0 * s.all_joints / s.with_body : 0.0);
-            CHECK(rate >= 27);
+            CHECK(rate >= min_rate);
             CHECK(s.with_body >= s.frames * 95 / 100);
             CHECK(s.in_area == s.with_body);
             CHECK(s.all_joints == s.with_body);
             CHECK(s.bad_image == 0 && s.bad_time == 0 && s.back_time == 0);
+            /* where the 30 joints came from (the wrapper logs it when it changes) */
+            EnterCriticalSection(&g_cs);
+            bool from_body = g_log_text.find("pose frames from the sender's BODY stream") != std::string::npos;
+            bool from_skel = g_log_text.find("pose frames from SKELETON") != std::string::npos;
+            bool offered = g_log_text.find("offers BODY") != std::string::npos;
+            LeaveCriticalSection(&g_cs);
+            printf("sender offers BODY: %s; frames from BODY: %s, from SKELETON: %s (expected: %s)\n", offered ? "yes" : "no",
+                   from_body ? "yes" : "no", from_skel ? "yes" : "no", expect_source.c_str());
+            CHECK(offered);
+            if (expect_source == "body") CHECK(from_body && !from_skel);
+            else CHECK(from_skel && !from_body);
         }
     }
 

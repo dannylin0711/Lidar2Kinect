@@ -59,9 +59,18 @@ add_test(NAME vp4u_map COMMAND test_vp4u)
 
 set_target_properties(l2k_dump l2k_fake_sender PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# the default: SKELETON + BODY at 60 frames a second, frames from the sender's BODY
 add_test(NAME vp4u_probe
     COMMAND vp4u_probe --check -t 6 --sender $<TARGET_FILE:l2k_fake_sender>)
+# a receiver that does not ask for BODY: every body made from SKELETON here
+file(WRITE ${CMAKE_BINARY_DIR}/probe_skeleton.ini "[vp4u]\nbody=0\n")
+add_test(NAME vp4u_probe_skeleton
+    COMMAND vp4u_probe --check -t 4 --expect-source skeleton --sender $<TARGET_FILE:l2k_fake_sender>)
 set_tests_properties(vp4u_probe PROPERTIES
     ENVIRONMENT "L2K_PORT=24812;L2K_INI=none.ini"
+    RUN_SERIAL TRUE
+    TIMEOUT 90)
+set_tests_properties(vp4u_probe_skeleton PROPERTIES
+    ENVIRONMENT "L2K_PORT=24813;L2K_INI=${CMAKE_BINARY_DIR}/probe_skeleton.ini"
     RUN_SERIAL TRUE
     TIMEOUT 90)

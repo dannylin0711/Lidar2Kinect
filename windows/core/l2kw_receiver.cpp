@@ -28,7 +28,7 @@ static uint8_t g_color_px[COLOR_BYTES];
 static l2k_assembler g_depth_as, g_color_as;
 
 struct Stats {
-    unsigned hello, skel, depth, color, lost, bad, late, depth_bytes, color_bytes, color_fail;
+    unsigned hello, skel, body, depth, color, lost, bad, late, depth_bytes, color_bytes, color_fail;
 };
 
 void init_module(HMODULE module, unsigned consumer_kind, const char *product) {
@@ -44,6 +44,7 @@ static void send_config(const sockaddr_in &to, uint32_t session, uint32_t *seq, 
     cfg.echo_sender_time_us = echo_us;
     cfg.receiver_time_us = now_us();
     cfg.streams = hub_wanted();
+    cfg.rate = hub_rate();
     cfg.skeleton_flags = hub_skeleton_flags();
     cfg.consumer_kind = (uint8_t)config().consumer_kind;
     cfg.depth_mode = (uint8_t)config().depth_mode;
@@ -57,8 +58,9 @@ static DWORD WINAPI receiver_main(void *) {
     const uint64_t timeout_us = (uint64_t)L2K_PEER_TIMEOUT_MS * 1000;
     uint64_t start = now_us();
     uint32_t my_session = (uint32_t)(start ^ (start >> 32) ^ GetCurrentProcessId()) | 1u, my_seq = 0;
-    uint32_t peer_session = 0, peer_seq = 0, last_wanted = 0, last_skel_frame = 0;
-    bool have_peer = false, present = false, have_skel = false;
+    uint32_t peer_session = 0, peer_seq = 0, last_wanted = 0, last_skel_frame = 0, last_body_frame = 0;
+    uint8_t last_rate = 0;
+    bool have_peer = false, present = false, have_skel = false, have_body = false;
     uint64_t last_packet = 0, last_report = start, last_config_sent = 0;
     sockaddr_in peer;
     SenderInfo info;
@@ -98,6 +100,7 @@ static DWORD WINAPI receiver_main(void *) {
                 peer_session = h.session;
                 peer_seq = h.seq - 1;
                 have_skel = false;
+                have_body = false;
                 l2k_assembler_init(&g_depth_as, g_depth_store, sizeof g_depth_store);
                 l2k_assembler_init(&g_color_as, g_color_store, sizeof g_color_store);
             }
@@ -130,6 +133,7 @@ static DWORD WINAPI receiver_main(void *) {
                 send_config(peer, my_session, &my_seq, hello.sender_time_us);
                 last_config_sent = now;
                 last_wanted = hub_wanted();
+                last_rate = hub_rate();
                 break;
             }
             case L2K_PKT_SKELETON: {
@@ -146,6 +150,22 @@ static DWORD WINAPI receiver_main(void *) {
                 last_skel_frame = f.frame_number;
                 st.skel++;
                 if (present) hub_skeleton(f);
+                break;
+            }
+            case L2K_PKT_BODY: {
+                static l2k_body_frame b; /* ~2.5 kB: off the stack; this thread only */
+                if (l2k_decode_body(pkt, (size_t)n, &b) != L2K_OK) {
+                    st.bad++;
+                    break;
+                }
+                if (have_body && !l2k_seq_newer(b.frame_number, last_body_frame)) {
+                    st.late++;
+                    break;
+                }
+                have_body = true;
+                last_body_frame = b.frame_number;
+                st.body++;
+                if (present) hub_body(b);
                 break;
             }
             case L2K_PKT_DEPTH:
@@ -221,21 +241,23 @@ static DWORD WINAPI receiver_main(void *) {
             hub_sender_present(false, info);
         }
         if (present) {
-            /* the game opened or closed a stream: tell the sender now rather than at the next HELLO */
+            /* the game opened or closed a stream (or the rate changed): tell the sender now rather than at the next HELLO */
             uint32_t wanted = hub_wanted();
-            if (wanted != last_wanted && now - last_config_sent > 50000) {
-                log("receiver: streams wanted 0x%x -> 0x%x", last_wanted, wanted);
+            uint8_t rate = hub_rate();
+            if ((wanted != last_wanted || rate != last_rate) && now - last_config_sent > 50000) {
+                log("receiver: streams wanted 0x%x -> 0x%x, rate %u -> %u", last_wanted, wanted, last_rate, rate);
                 send_config(peer, my_session, &my_seq, 0);
                 last_config_sent = now;
                 last_wanted = wanted;
+                last_rate = rate;
             }
         }
         hub_tick();
         if (now - last_report >= 5000000) {
             if (present || st.hello || st.bad) {
                 double s = (double)(now - last_report) / 1e6;
-                log("receiver: last %.0f s: hello %u, skeleton %.1f/s, depth %.1f/s (%u B), colour %.1f/s (%u B), lost %u, late %u, bad %u, colour decode failures %u",
-                    s, st.hello, st.skel / s, st.depth / s, st.depth ? st.depth_bytes / st.depth : 0, st.color / s,
+                log("receiver: last %.0f s: hello %u, skeleton %.1f/s, body %.1f/s, depth %.1f/s (%u B), colour %.1f/s (%u B), lost %u, late %u, bad %u, colour decode failures %u",
+                    s, st.hello, st.skel / s, st.body / s, st.depth / s, st.depth ? st.depth_bytes / st.depth : 0, st.color / s,
                     st.color ? st.color_bytes / st.color : 0, st.lost, st.late, st.bad, st.color_fail);
             }
             memset(&st, 0, sizeof st);

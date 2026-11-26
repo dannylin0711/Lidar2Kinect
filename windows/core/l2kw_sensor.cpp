@@ -625,6 +625,11 @@ uint32_t hub_skeleton_flags() {
     return g_sensor.tracking ? g_sensor.skel_flags : 0;
 }
 
+/* A Kinect delivers 30 skeleton frames a second and has no 30-joint body: ask for the default rate and
+ * never for L2K_STREAM_BODY (hub_wanted), so this is never called. */
+uint8_t hub_rate() { return 0; }
+void hub_body(const l2k_body_frame &) {}
+
 bool hub_sender_has_depth() {
     Lock l;
     return (g_sender.caps & L2K_STREAM_DEPTH) != 0;

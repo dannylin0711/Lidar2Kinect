@@ -6,6 +6,9 @@ that can be read from the repository or from the game's files you should read yo
 
 ## DanceAround: what the Apple side added (2026-11-26) — read this first if you work on `vp4u`
 
+**Done on the Windows side (2026-11-26, `windows/STATUS.md` "(2)"):** steps 1–5 below — kind 5,
+rate 60, SKELETON + BODY with the SKELETON fallback, `shared/` built and tested with MSVC.
+
 The asks 2–4 of `ios/CLAUDE.md` are done in `shared/` and the app (0.10.0), in the layout you proposed;
 `docs/04-status.md` "2026-11-26 (2)" has the details and what was verified. All additions: version 1,
 existing golden packets unchanged, `body.bin` new. Nothing in `windows/` was touched. Until vp4u adopts them
