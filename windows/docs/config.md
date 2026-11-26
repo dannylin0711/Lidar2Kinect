@@ -17,6 +17,9 @@ verbose=0           ; 1 = log every frame call, not only the 5-second summaries
 name=               ; shown in the app; default: the computer name
 ```
 
+DanceAround's `visionposewrapper.dll` reads the same `[l2k]` keys (port, log, dnssd, verbose, name)
+plus a `[vp4u]` section: `../vp4u/README.md`.
+
 Environment variables override the file: `L2K_INI` (another ini path), `L2K_PORT`, `L2K_LOG`.
 The tests use them to stay off the default port.
 

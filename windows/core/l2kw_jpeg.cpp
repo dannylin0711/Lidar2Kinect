@@ -1,5 +1,5 @@
 /* JPEG -> BGRX with the Windows Imaging Component (part of every Windows since Vista). */
-#include "l2kw.h"
+#include "l2kw_base.h"
 
 #include <wincodec.h>
 

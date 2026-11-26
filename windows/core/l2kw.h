@@ -4,85 +4,23 @@
  *
  * Threads: the receiver owns one thread (socket, decoding). The game's Nui thread calls the
  * sensor. Both meet in the hub (l2kw_sensor.cpp) under one lock.
+ *
+ * The parts that do not depend on the Kinect ABI (config, log, receiver, hub interface) are in
+ * l2kw_base.h, which the x64 vp4u wrapper uses on its own.
  */
 #ifndef L2KW_H
 #define L2KW_H
 
 #include "nui_abi.h"
-
-extern "C" {
-#include "l2k/l2k.h"
-}
+#include "l2kw_base.h"
 
 namespace l2kw {
-
-/* What the game sees while no sender is connected (windows/docs/no-sender.md). */
-enum NoSenderMode {
-    NO_SENDER_MISSING = 0, /* like an unplugged Kinect: no sensor; the status callback announces it once a sender appears */
-    NO_SENDER_IDLE = 1     /* a sensor is always there; it delivers empty frames until a sender appears */
-};
-/* Where the depth image comes from. */
-enum DepthSource {
-    DEPTH_AUTO = 0,     /* the sender's depth image while it sends one, else drawn from the skeleton */
-    DEPTH_SENDER = 1,   /* only the sender's */
-    DEPTH_SKELETON = 2  /* always drawn from the skeleton (l2k_depth_rasterize) */
-};
-
-struct Config {
-    unsigned port;
-    char log_path[MAX_PATH]; /* empty: no log */
-    char ini_path[MAX_PATH];
-    int no_sender;     /* NoSenderMode */
-    int depth_source;  /* DepthSource */
-    int depth_mode;    /* L2K_DEPTH_MODE_* asked of the sender */
-    int color_quality; /* 0 = sender default */
-    int dnssd;         /* advertise _l2k._udp */
-    int verbose;       /* log every API call, not just summaries */
-    char name[L2K_NAME_SIZE + 1];
-    unsigned consumer_kind; /* L2K_CONSUMER_FAKE_KINECT or L2K_CONSUMER_SPICE_HOOK */
-};
-
-/* DllMain: remember which module we are (l2k.ini and the log live next to it). Stores only. */
-void init_module(HMODULE module, unsigned consumer_kind);
-/* Reads l2k.ini next to `module` (env overrides: L2K_INI, L2K_PORT, L2K_LOG). Called by start(). */
-void config_load(HMODULE module, unsigned consumer_kind);
-const Config &config();
-
-void log_open();
-void log(const char *fmt, ...);
-double uptime_s();
-uint64_t now_us();
-
-/* Starts the receiver thread (idempotent, thread safe). Called from the first API call, never from DllMain. */
-void start();
-
-/* JPEG (baseline) -> BGRX via WIC. Returns false if it cannot be decoded or is not w x h. */
-bool jpeg_decode_bgrx(const uint8_t *data, size_t len, uint8_t *out, int w, int h);
-
-/* DNS-SD advertisement of _l2k._udp (dnsapi.dll, loaded at run time; absent = silently off). */
-void dnssd_start(unsigned port, const char *name);
-void dnssd_stop();
 
 /* NUI <-> shared types */
 void to_nui(const l2k_skeleton_frame &in, NUI_SKELETON_FRAME &out, LONGLONG timestamp_ms);
 void from_nui(const NUI_SKELETON_FRAME &in, l2k_skeleton_frame &out);
 
-/* ---- the hub: what the receiver gives the sensor ---- */
-struct SenderInfo {
-    bool present;
-    char name[L2K_NAME_SIZE + 1];
-    uint32_t caps;
-    uint8_t source_kind;
-};
-
-/* receiver -> hub */
-void hub_sender_present(bool present, const SenderInfo &info);
-void hub_skeleton(const l2k_skeleton_frame &frame);
-void hub_depth(const uint16_t *pixels, uint32_t frame_number); /* 320x240 */
-void hub_color(const uint8_t *bgrx, uint32_t frame_number);    /* 640x480 x 4 */
-void hub_tick();       /* called every few ms by the receiver: frame-end liveness, empty frames, summaries */
-uint32_t hub_wanted(); /* L2K_STREAM_* the game currently needs */
-uint32_t hub_skeleton_flags();
+/* hub, Kinect side only */
 bool hub_sender_has_depth();
 
 /* ---- the Kinect API (flat functions = Kinect10.dll exports; same signatures) ---- */

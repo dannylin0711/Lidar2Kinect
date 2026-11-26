@@ -1,5 +1,5 @@
 /* Configuration file, log, clock. */
-#include "l2kw.h"
+#include "l2kw_base.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -9,6 +9,7 @@
 namespace l2kw {
 
 static Config g_config;
+static char g_product[48];
 static FILE *g_log;
 static CRITICAL_SECTION g_log_cs;
 static LARGE_INTEGER g_freq, g_t0;
@@ -28,6 +29,8 @@ double uptime_s() {
 
 const Config &config() { return g_config; }
 
+void set_product_name(const char *product) { snprintf(g_product, sizeof g_product, "%s", product ? product : ""); }
+
 static void module_dir(HMODULE module, char *out, size_t cap) {
     char *slash;
     DWORD n = GetModuleFileNameA(module, out, (DWORD)cap);
@@ -35,8 +38,12 @@ static void module_dir(HMODULE module, char *out, size_t cap) {
         out[0] = 0;
         return;
     }
+    /* a loader that maps the module through a virtual file system may report it with '/' */
     slash = strrchr(out, '\\');
+    char *fwd = strrchr(out, '/');
+    if (fwd && (!slash || fwd > slash)) slash = fwd;
     if (slash) slash[1] = 0;
+    else out[0] = 0;
 }
 
 /* relative paths are relative to the DLL's folder */
@@ -108,11 +115,24 @@ void log_open() {
     if (!g_log) return;
     GetModuleFileNameA(NULL, exe, sizeof exe);
     log("Lidar2Kinect %s, consumer kind %u, process %s (pid %lu)",
-        g_config.consumer_kind == L2K_CONSUMER_SPICE_HOOK ? "spice2x hook" : "Kinect10.dll", g_config.consumer_kind, exe, GetCurrentProcessId());
+        g_product[0] ? g_product : g_config.consumer_kind == L2K_CONSUMER_SPICE_HOOK ? "spice2x hook" : "Kinect10.dll", g_config.consumer_kind,
+        exe, GetCurrentProcessId());
     log("config %s: port %u, no_sender %s, depth %s, depth_mode %d, color_quality %d, dnssd %d, verbose %d, name \"%s\"", g_config.ini_path,
         g_config.port, g_config.no_sender == NO_SENDER_IDLE ? "idle" : "missing",
         g_config.depth_source == DEPTH_SENDER ? "sender" : g_config.depth_source == DEPTH_SKELETON ? "skeleton" : "auto", g_config.depth_mode,
         g_config.color_quality, g_config.dnssd, g_config.verbose, g_config.name);
+}
+
+bool log_is_open() { return g_log != NULL; }
+
+bool log_open_at(const char *path) {
+    if (g_log || !path || !path[0]) return g_log != NULL;
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    snprintf(g_config.log_path, sizeof g_config.log_path, "%s", path);
+    g_log = f;
+    log("Lidar2Kinect %s: log opened at %s", g_product[0] ? g_product : "core", path);
+    return true;
 }
 
 void log(const char *fmt, ...) {

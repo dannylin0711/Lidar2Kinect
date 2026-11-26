@@ -2,7 +2,7 @@
  * Advertise the receiver as _l2k._udp with the DNS-SD API of dnsapi.dll (Windows 10 1809 and
  * later). The functions are looked up at run time: where they are missing, nothing happens.
  */
-#include "l2kw.h"
+#include "l2kw_base.h"
 
 #include <windns.h>
 #include <stdio.h>

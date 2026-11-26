@@ -2,6 +2,23 @@
 
 Newest first. Each side appends its own entries; the Windows side also keeps `windows/STATUS.md`.
 
+## 2026-11-26 — second game: DanceAround (Windows side)
+
+Details: `windows/STATUS.md`, `windows/docs/vp4u-interface.md`, `windows/vp4u/README.md`.
+
+- DanceAround (Konami, UDN) tracks the player with two RealSense cameras and VisionPose, behind
+  one native plugin, `VisionPoseWrapper.dll` (vp4u API 210). `windows/vp4u` replaces it, fed by
+  the existing L2K1 stream: 64-bit, its own CMake project.
+- Phase 1 uses the stream as it is: the Kinect v1 skeleton is levelled with `up`, placed in the
+  game's coordinates using the floor plane, and its 20 joints extended to the game's 30.
+  **No change to `shared/` or `ios/`; golden packets unchanged.**
+- Verified with `l2k_fake_sender` only (30 fps, every frame inside the game's play area). Not run
+  in the game, not with the app.
+- **For phase 2 (both sides, later):** the game's skeleton has thumbs, hand tips, nose, eyes,
+  ears, and the original ran at 60 fps. Candidates: a new stream bit with a 30-joint body record
+  (ARKit has the hand and face joints), a 60 fps option, and a `consumer_kind` value for vp4u.
+  Additions only, so old peers are unaffected — but a decision for both sides.
+
 ## 2026-11-10 — Windows side working in the game (Windows side)
 
 Details and measurements: `windows/STATUS.md`.

@@ -3,7 +3,7 @@
  * HELLO with a CONFIG for the streams the game has open, keep the newest skeleton frame,
  * reassemble and decode depth (D1 / raw) and colour (JPEG), notice when the sender goes silent.
  */
-#include "l2kw.h"
+#include "l2kw_base.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -31,9 +31,10 @@ struct Stats {
     unsigned hello, skel, depth, color, lost, bad, late, depth_bytes, color_bytes, color_fail;
 };
 
-void init_module(HMODULE module, unsigned consumer_kind) {
+void init_module(HMODULE module, unsigned consumer_kind, const char *product) {
     g_module = module;
     g_kind = consumer_kind;
+    if (product) set_product_name(product);
 }
 
 static void send_config(const sockaddr_in &to, uint32_t session, uint32_t *seq, uint64_t echo_us) {

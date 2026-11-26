@@ -3,6 +3,69 @@
 Newest first. Machine: Windows 11 Pro 26200, Visual Studio 2022 17.14 (MSVC 14.44, bundled CMake
 3.31), Kinect for Windows Runtime 1.8 installed, no real Kinect. Game: Dance Evolution Arcade
 KDM-2016021900 with spice2x 2026-10-30 in `F:\BEMANI\DEA\KDM-2016021900\contents`.
+DanceAround UDN-2022062801 dump in `F:\BEMANI\UDN-001-2022062801`, a spice2x runner for it in
+`F:\下載\runner-dar-spice-`; GPU RTX 4070 Ti.
+
+## 2026-11-26 — DanceAround: vp4u wrapper, phase 1 (builds, tests pass, not run in the game)
+
+Why: DanceAround's camera pipeline (two RealSense + NEXT-SYSTEM VisionPose on TensorRT 7.2.1)
+cannot run on an RTX 40 card (TensorRT 7.2 has no sm_89) and needs a hardware-bound VisionPose
+activation. Replacing `VisionPoseWrapper.dll`, the game's only native entry into that pipeline,
+avoids all of it.
+
+Done:
+
+- **Facts about the game's interface**: `docs/vp4u-interface.md` (from the game's managed
+  metadata/IL, the original DLL's exports, the configs, a log of the original wrapper). Function
+  table, structs, callbacks, boot order, what must return what, camera image format, coordinates
+  (with the inferred parts marked), open points.
+- **Core split, no behaviour change**: `core/l2kw_base.h` holds config / log / receiver / hub
+  interface without `nui_abi.h`; `l2kw.h` includes it and adds the Kinect parts. The receiver,
+  util, JPEG and DNS-SD files include only the base header, so they also build for x64.
+  `init_module` takes an optional product name for the log's first line.
+- **`vp4u/`** (own CMake project, x64): `visionposewrapper.dll` (four exports at the original
+  ordinals, the 29-entry table, a dispatcher thread for the callbacks), `vp4u_map` (Kinect v1 frame
+  → 30-joint vp4u bodies: levelled by `up`, placed in the game's frame, 10 joints derived),
+  `vp4u_probe.exe` (the game's call order), `test_vp4u.exe`. Config `[vp4u]` in `l2k.ini`,
+  `vp4u/README.md`.
+
+Verified:
+
+| What | How |
+|---|---|
+| x86 side unchanged | `cmake --build build/windows` (no warnings), `ctest --test-dir build/windows`: 4/4 (`core`, `probe_stream`, `probe_reconnect`, `l2k`) |
+| shared builds x64 | `test_l2k` x64 passes against the golden packets |
+| mapping | `test_vp4u`: 206 checks — axes (player's right +x, y up, z towards the player), a 2 m / −24° phone levelled onto a 1 m level one within 5–8 cm, floor at −camera height, play area, phone height override / fallback, mirror, yaw, two players, position-only slots left out |
+| the DLL as the game calls it | `vp4u_probe --check` (ctest `vp4u_probe`, 6 s): version 210 / wrong version refused / NULL table refused, all 29 entries, Initialize non-NULL, LoadConfig reads LeftCameraPose.Y, Init* return 1, cameras active, ~25–29 empty frames/s without a sender, then with `l2k_fake_sender` 30.0 pose frames/s, 100 % with a body, 100 % with SpineBase inside the game's play area, all 30 joints valid, timestamps monotonic and < 100 ms old, RGB24 image valid; preview 28 frames/s per side, nothing after Stop; calibration ends with status 3; offline analysis ends with a NULL image; no pose callback after StopRealtimeAnalysis |
+
+In the game (first run, Danny, spice2x, RTX 4070 Ti, no sender; `docs/vp4u-interface.md` §8):
+the loader loaded the DLL and called `vp4uPreboot`; VisionPose came up ready through the
+wrapper; test mode's camera check and calibration screens worked. Then
+**`CameraErrorUncalibrated 5-1503-1001`**: the game requires `dev/nvram/stereo_cam.yml` in its
+VFS (an encrypted `nvram2` mount). Second build: writes a placeholder there at `LoadConfig` and at
+calibration commit (`[vp4u] calibration_file`), reports whether the loader hooked its file
+imports, and falls back to `dev/raw/log/l2k.log` when `l2k.log` cannot be opened next to the DLL
+(it was not, in the first run). `vp4u_probe` checks the placeholder (348 checks pass).
+
+Second run: the wrapper's file calls are not redirected into the VFS (0 imports hooked; the
+placeholder became a plain file under `…\game\dev\nvram\`), so the game still reported the
+camera uncalibrated. `GameFs.IsFileExistVfs` asks avs through KAMUNITY (`FsLstat`). Third build:
+writes and checks the placeholder through `kamunity.dll`'s `FsOpen` / `FsWrite` / `FsClose` /
+`FsLstat` exports (the game's own native bridge to avs). Builds, tests pass; the avs path itself
+only runs inside the game.
+
+Third run: **the game boots to its attract demo with the wrapper** — the placeholder is in the VFS
+("written to the game's VFS"), no camera error, only the network-services error (no server).
+Empty pose frames ~24.5/s throughout. `vp4uPreboot` gets the config's text, not a path; the log
+line no longer prints it (fourth build, not yet installed).
+
+Not done / not verified:
+
+- A run with a sender (fake sender, then the iPhone app): player detection, left/right, origin. Open points 1–7 of
+  `docs/vp4u-interface.md`, above all left/right and the origin.
+- Not with the real iPhone app.
+- No change to `shared/` or `ios/`. Phase 2 (30-joint stream, 60 fps, a `L2K_CONSUMER_*` value for
+  vp4u — CONFIG now sends 0 "unknown") needs both sides.
 
 ## 2026-11-10 — first Windows build, 2b and 2a working in the game
 

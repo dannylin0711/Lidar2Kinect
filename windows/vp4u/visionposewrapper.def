@@ -1,0 +1,7 @@
+; The four exports of DanceAround's VisionPoseWrapper.dll, at the original ordinals.
+LIBRARY visionposewrapper
+EXPORTS
+    vp4uGetApiTable @1
+    vp4uGetVersion  @2
+    vp4uPreboot     @3
+    vp4uShutdown    @4
