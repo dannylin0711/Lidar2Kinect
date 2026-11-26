@@ -8,18 +8,35 @@ public final class SyntheticSource: L2KSource {
     public let kind = UInt8(L2K_SOURCE_SYNTHETIC)
     public var maxTracked: Int { players }
     public let providesImages = true
-    public var statusText: String { "Synthetic figure, \(players) player\(players == 1 ? "" : "s"), \(Int(fps)) fps" }
+    public var statusText: String { "Synthetic figure, \(players) player\(players == 1 ? "" : "s"), \(Int(fps.rounded())) fps" }
     public var onFrame: ((L2KSourceFrame) -> Void)?
 
     public let players: Int
-    public let fps: Double
+    /// Frames a second: as created, then what the session asks for (`requestFrameRate`).
+    public var fps: Double {
+        rateLock.lock()
+        defer { rateLock.unlock() }
+        return currentFPS
+    }
+    private var currentFPS: Double
+    private let rateLock = NSLock()
+    public var maxFrameRate: Double { 120 }
     private let queue = DispatchQueue(label: "l2k.source.synthetic")
     private var timer: DispatchSourceTimer?
     private var startTime: TimeInterval = 0
 
     public init(players: Int = 1, fps: Double = 30) {
         self.players = max(1, min(2, players))
-        self.fps = fps
+        currentFPS = fps
+    }
+
+    public func requestFrameRate(_ rate: Double) {
+        let rate = min(max(rate, 1), maxFrameRate)
+        rateLock.lock()
+        let changed = rate != currentFPS
+        currentFPS = rate
+        rateLock.unlock()
+        if changed { timer?.schedule(deadline: .now() + 1 / rate, repeating: 1 / rate, leeway: .milliseconds(1)) }
     }
 
     public func start() throws {

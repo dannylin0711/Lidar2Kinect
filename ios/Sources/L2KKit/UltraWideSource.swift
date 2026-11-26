@@ -40,7 +40,8 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
 
     /// - Parameter captureRate: frames per second asked of the camera, 30 or 60. 60: the format with the widest view
     ///   among those that run that fast (it can show less than the 30 fps one; 30 again when the camera has none).
-    ///   The body is still detected 30 times a second, on the newest frame.
+    ///   The body is still detected 30 times a second, on the newest frame, unless a receiver asks for more
+    ///   (`requestFrameRate`): then on every frame Vision keeps up with.
     public init(lens: Lens = .rearUltraWide, captureRate: Double = 30) {
         self.lens = lens
         self.captureRate = captureRate
@@ -63,6 +64,8 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
     private var maskFrame = 0, maskMs = 0.0, masksMade = 0
     private let captureRate: Double
     private var runningRate = 30.0
+    /// The body is detected on at most this many camera frames a second (`requestFrameRate`; on `queue`).
+    private var detectionRate = 30.0
     private var lastUsedTime: Double?
     private var used = 0, usedCount = 0, usedRate = 0.0
     private var readyMs = 0.0
@@ -84,6 +87,16 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             detector.lengthSource = newValue ? .model : .picture
         }
     }
+
+    /// The camera's rate as it runs (30 until it has started; 60 only with `captureRate` 60 and a format that allows it).
+    public var maxFrameRate: Double {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return publishedRate
+    }
+    private var publishedRate = 30.0
+
+    public func requestFrameRate(_ rate: Double) { detectionRate = max(1, rate) }
 
     public var usesCameraIntrinsics: Bool {
         get { detector.givesIntrinsics }
@@ -265,6 +278,9 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
                     camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: Int32(rate.rounded()))
                     self.runningRate = rate
                 }
+                self.stateLock.lock()
+                self.publishedRate = self.runningRate
+                self.stateLock.unlock()
                 // Short exposures: a fast-moving hand smeared across the frame is a hand the detector loses.
                 // The camera raises its gain instead; a noisier picture costs the detector less than blur.
                 let shortest = CMTime(value: 1, timescale: Self.shortestExposureDenominator)
@@ -313,9 +329,9 @@ public final class UltraWideSource: NSObject, L2KSource, AVCaptureVideoDataOutpu
             rateCount = 0
             usedCount = 0
         }
-        // A camera running faster than 30 frames a second: the body is detected on every second frame.
+        // A camera running faster than the detection rate (60 against 30): the body is detected on every second frame.
         if taken.isFinite {
-            guard L2KCameraView.usesFrame(at: taken, last: lastUsedTime) else { return }
+            guard L2KCameraView.usesFrame(at: taken, last: lastUsedTime, rate: detectionRate) else { return }
             lastUsedTime = taken
         }
         used += 1

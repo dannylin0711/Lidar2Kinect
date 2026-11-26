@@ -2,6 +2,49 @@
 
 Newest first. Each side appends its own entries; the Windows side also keeps `windows/STATUS.md`.
 
+## 2026-11-26 (2) — DanceAround on the Apple side: its game, 60 frames a second, 30 joints; app 0.10.0 (Apple side)
+
+Danny: "let's finish the l2k of the dar support on ios" — asks 2–4 of `ios/CLAUDE.md`. **`shared/` and the
+protocol change, by additions only** (version stays 1; old receivers and old apps are unaffected; the existing
+golden packets are byte-for-byte the same, `body.bin` is new). Layout as the Windows side proposed it.
+
+- **`consumer_kind` 5 = `L2K_CONSUMER_VP4U`.** `l2k_game_of_consumer` / `l2k_map_params_set_game`: kind 5 is
+  DanceAround, every other kind Dance Evolution (so today's vp4u, which sends 0, still gets Dance Evolution's).
+  DanceAround's fit keeps the hips at 1.90–2.70 m and ±0.80 m (its play area 1.80–2.81 m, ±0.9 m, with vp4u's
+  default phone placement), "Best position" puts one player at 2.3 m (reach 0.4 m), and only one player is sent
+  when normalising. The app follows the connected receiver (`L2KPipeline.game`, set by `L2KSession`; sticky while
+  none is connected; `-l2kGame 1` to start on DanceAround): its texts, the "Best position for …" switch and the
+  distance warnings name the game and its numbers; the DanceAround placement text is shown for it. docs/03 §4.
+- **CONFIG `rate`** (byte 43, reserved and 0 until now): skeleton / body frames a second wanted, 0 = 30. The
+  session asks the source for it (`L2KSource.requestFrameRate`): the ultra-wide and front cameras detect on every
+  frame of a 60 fps camera (only with "Faster camera" on; else 30, and the app says the receiver asked for more),
+  the LiDAR source processes up to 60 ARKit frames, ARKit body tracking passes its 60, the test figure follows.
+  Depth and colour stay at 30 a second at most. docs/02 §3.
+- **BODY packet (0x13), stream bit 0x8:** the 30 joints of vp4u (Kinect v2's 25 + nose, eyes, ears), same
+  header, space and slots as SKELETON, 412 bytes per tracked body (two fit a datagram; a third is sent as
+  position only). `l2k_encode_body` / `l2k_decode_body`, `l2k_body_frame`. docs/02 §4b.
+- **The ten extra joints** (`l2k_mapper_body_frame`): source joints `L2K_SRC_NOSE` … `L2K_SRC_THUMB_RIGHT`
+  (`L2K_SRC_JOINT_COUNT` 19 → 28; the skeleton is built from the first 19, `L2K_SRC_SKELETON_COUNT`, and is
+  unchanged by the others); what a source does not give is placed from the skeleton with the Windows side's
+  formulas, moved into `shared/` (`l2k_body_frame_from_skeleton` for a receiver given only SKELETON). Moved with
+  the skeleton by the hold, the fit and the normalising. Face from Vision 2D in the LiDAR source (lifted with the
+  depth map) and in the camera-only sources (on their rays around the placed head:
+  `VisionHybridDetector.placeFace`); ARKit's nose and eyes; hand tips and thumbs are placed everywhere (no source
+  tracks them). The synthetic figure has its own face (its head turns ±20°) and hands. docs/03 §4b.
+- Tools: `l2k_fake_sender` announces BODY, sends it when asked and follows the receiver's rate;
+  `l2k_dump -s 9 -r 60 -k 5` asks like vp4u will and prints the first body.
+- **Verified (Mac):** `make -C shared test` 1470 checks (new: CONFIG rate byte, BODY packet and golden, games,
+  body mapping through fit / normalising / hold, two players in one BODY datagram); `swift test` 26 tests (new:
+  a vp4u-like receiver gets 59 skeletons, 59 bodies and 29 depth images a second from the test figure and
+  DanceAround's play area is chosen; the rate rule; the game's play area through the pipeline; face placement),
+  the two picture tests with a frame of the Dance Evolution port's reference video (face points 7–8 cm in front of
+  the head, ears beside it); `l2k_fake_sender` ↔ `l2k_dump` over loopback: 60 skeleton and 60 body frames a
+  second; the app builds for iOS (0.10.0 build 18, Xcode project regenerated).
+- **Not verified:** anything on a device (whether Vision keeps up with 60 a second, and the face points on a
+  person); anything in DanceAround — **the Windows side has to adopt it first** (kind 5, rate 60, ask for BODY;
+  `windows/AGENT_PROMPT.md` "DanceAround: what the Apple side added"). Until then DanceAround keeps getting what it
+  got: SKELETON at 30, Dance Evolution's play area. Not built with MSVC.
+
 ## 2026-11-26 — second game: DanceAround (Windows side)
 
 Details: `windows/STATUS.md`, `windows/docs/vp4u-interface.md`, `windows/vp4u/README.md`.

@@ -74,6 +74,22 @@ void l2k_synth_body_at(double t, int player, int players, float camera_height, f
         out->p[kn] = v3(hx, (hip_y + ankle_y) / 2 + 0.01, cz + knee_fwd);
         out->p[an] = v3(hx, ankle_y, cz + 0.02);
         out->p[to] = v3(hx, ankle_y - 0.05, cz + 0.15);
+
+        /* hand tip and thumb: along the forearm past the wrist, the thumb in front */
+        out->p[side ? L2K_SRC_HAND_TIP_RIGHT : L2K_SRC_HAND_TIP_LEFT] = v3(wrx + sx * 0.18 * sin(b), wry - 0.18 * cos(b), cz + 0.10);
+        out->p[side ? L2K_SRC_THUMB_RIGHT : L2K_SRC_THUMB_LEFT] = v3(wrx + sx * 0.06 * sin(b), wry - 0.06 * cos(b), cz + 0.12);
+    }
+    {
+        /* the face, on a head that turns from side to side (+-20 degrees); the head joint itself does not move with it */
+        static const double FACE[5][3] = { /* x = the figure's left, y = up, z = where it faces; from the head centre */
+            {0.0, -0.02, 0.085}, {0.032, 0.03, 0.075}, {-0.032, 0.03, 0.075}, {0.075, 0.0, -0.01}, {-0.075, 0.0, -0.01}};
+        static const int SRC[5] = {L2K_SRC_NOSE, L2K_SRC_EYE_LEFT, L2K_SRC_EYE_RIGHT, L2K_SRC_EAR_LEFT, L2K_SRC_EAR_RIGHT};
+        double yaw = 0.35 * sin(2 * PI * (t + phase) / 3.0), cy = cos(yaw), sy = sin(yaw);
+        l2k_vec3 head = out->p[L2K_SRC_HEAD];
+        for (i = 0; i < 5; i++) {
+            double x = FACE[i][0] * cy + FACE[i][2] * sy, z = -FACE[i][0] * sy + FACE[i][2] * cy;
+            out->p[SRC[i]] = v3(head.x + x, head.y + FACE[i][1], head.z + z);
+        }
     }
     for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) out->conf[i] = 2;
     if (tilt_deg != 0.0f) {

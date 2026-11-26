@@ -3,9 +3,11 @@
  * CONFIG asking for streams, decodes everything it gets and prints one status line per second.
  * It is the smallest complete receiver: the Windows fake Kinect and the game port follow the same steps.
  *
- *   l2k_dump [-p port] [-s streams] [-m depth_mode] [-o dir] [-t seconds]
- *     -s  stream bits wanted: 1 skeleton, 2 depth, 4 colour (default 7)
+ *   l2k_dump [-p port] [-s streams] [-m depth_mode] [-r rate] [-k consumer_kind] [-o dir] [-t seconds]
+ *     -s  stream bits wanted: 1 skeleton, 2 depth, 4 colour, 8 30-joint bodies (default 7)
  *     -m  0 = depth on player pixels only (default), 1 = full depth
+ *     -r  skeleton / body frames per second asked for (default 0 = the sender's default, 30)
+ *     -k  consumer_kind announced (default 1, monitor; 5 = DanceAround's vp4u, to see what the app sends it)
  *     -o  write the newest depth image (depth.pgm, 16-bit mm; players.pgm) and colour image (color.jpg) there
  *     -t  stop after this many seconds (default: run until killed)
  */
@@ -50,25 +52,28 @@ static void save_depth(const char *dir) {
 int main(int argc, char **argv) {
     uint16_t port = L2K_DEFAULT_PORT;
     uint32_t want = L2K_STREAM_SKELETON | L2K_STREAM_DEPTH | L2K_STREAM_COLOR;
-    uint8_t depth_mode = L2K_DEPTH_MODE_PLAYERS;
+    uint8_t depth_mode = L2K_DEPTH_MODE_PLAYERS, rate = 0, kind = L2K_CONSUMER_MONITOR;
     const char *outdir = NULL;
     double run_seconds = 0;
     net_socket sock;
     l2k_assembler depth_as, color_as;
     l2k_skeleton_frame skel;
+    l2k_body_frame body;
     uint32_t my_session, my_seq = 0, peer_session = 0, peer_seq = 0;
-    int have_peer = 0, have_skel = 0, i;
+    int have_peer = 0, have_skel = 0, have_body = 0, i;
     uint64_t start, last_report, last_packet = 0;
-    unsigned n_skel = 0, n_depth = 0, n_color = 0, n_lost = 0, n_bad = 0, depth_bytes = 0, color_bytes = 0, players_px = 0;
+    unsigned n_skel = 0, n_body = 0, n_depth = 0, n_color = 0, n_lost = 0, n_bad = 0, depth_bytes = 0, color_bytes = 0, players_px = 0;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-p") && i + 1 < argc) port = (uint16_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) want = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "-m") && i + 1 < argc) depth_mode = (uint8_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-r") && i + 1 < argc) rate = (uint8_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-k") && i + 1 < argc) kind = (uint8_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) outdir = argv[++i];
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) run_seconds = atof(argv[++i]);
         else {
-            fprintf(stderr, "usage: l2k_dump [-p port] [-s streams] [-m depth_mode] [-o dir] [-t seconds]\n");
+            fprintf(stderr, "usage: l2k_dump [-p port] [-s streams] [-m depth_mode] [-r rate] [-k consumer_kind] [-o dir] [-t seconds]\n");
             return 2;
         }
     }
@@ -80,7 +85,8 @@ int main(int argc, char **argv) {
     l2k_assembler_init(&color_as, color_store, sizeof color_store);
     start = last_report = net_now_us();
     my_session = (uint32_t)(start ^ (start >> 32)) | 1u;
-    printf("l2k_dump: listening on UDP %u, wanting streams 0x%x\n", (unsigned)port, (unsigned)want);
+    printf("l2k_dump: listening on UDP %u, wanting streams 0x%x at %u frames/s (0 = default), consumer kind %u\n", (unsigned)port,
+           (unsigned)want, (unsigned)rate, (unsigned)kind);
     fflush(stdout);
 
     for (;;) {
@@ -101,6 +107,7 @@ int main(int argc, char **argv) {
                 peer_session = h.session;
                 peer_seq = h.seq - 1;
                 have_skel = 0;
+                have_body = 0;
                 l2k_assembler_init(&depth_as, depth_store, sizeof depth_store);
                 l2k_assembler_init(&color_as, color_store, sizeof color_store);
             }
@@ -119,8 +126,9 @@ int main(int argc, char **argv) {
                 cfg.echo_sender_time_us = hello.sender_time_us;
                 cfg.receiver_time_us = now;
                 cfg.streams = want & hello.caps;
-                cfg.consumer_kind = L2K_CONSUMER_MONITOR;
+                cfg.consumer_kind = kind;
                 cfg.depth_mode = depth_mode;
+                cfg.rate = rate;
                 strcpy(cfg.name, "l2k_dump");
                 len = l2k_encode_config(pkt, sizeof pkt, my_session, ++my_seq, &cfg);
                 sendto(sock, (const char *)pkt, (int)len, 0, (struct sockaddr *)&from, from_len);
@@ -138,6 +146,15 @@ int main(int argc, char **argv) {
                 skel = f;
                 have_skel = 1;
                 n_skel++;
+                break;
+            }
+            case L2K_PKT_BODY: {
+                l2k_body_frame f;
+                if (l2k_decode_body(pkt, (size_t)n, &f) != L2K_OK) { n_bad++; break; }
+                if (have_body && !l2k_seq_newer(f.frame_number, body.frame_number)) break; /* late */
+                body = f;
+                have_body = 1;
+                n_body++;
                 break;
             }
             case L2K_PKT_DEPTH:
@@ -188,8 +205,8 @@ int main(int argc, char **argv) {
             if (!have_peer || now - last_packet > (uint64_t)L2K_PEER_TIMEOUT_MS * 1000) {
                 printf("waiting for a sender...\n");
             } else {
-                printf("skel %2u/s  depth %2u/s (%u B, %u player px)  colour %2u/s (%u B)  lost %u  bad %u  tracked %d",
-                       n_skel, n_depth, n_depth ? depth_bytes / n_depth : 0, players_px, n_color, n_color ? color_bytes / n_color : 0, n_lost, n_bad, tracked);
+                printf("skel %2u/s  body %2u/s  depth %2u/s (%u B, %u player px)  colour %2u/s (%u B)  lost %u  bad %u  tracked %d",
+                       n_skel, n_body, n_depth, n_depth ? depth_bytes / n_depth : 0, players_px, n_color, n_color ? color_bytes / n_color : 0, n_lost, n_bad, tracked);
                 if (first >= 0) {
                     const l2k_skeleton *s = &skel.skeletons[first];
                     printf("  slot %d id %u head (%.2f %.2f %.2f) handL (%.2f %.2f %.2f) floor %.2f tilt %.1f", first, (unsigned)s->tracking_id,
@@ -197,10 +214,22 @@ int main(int argc, char **argv) {
                            s->joints[L2K_JOINT_HAND_LEFT].x, s->joints[L2K_JOINT_HAND_LEFT].y, s->joints[L2K_JOINT_HAND_LEFT].z,
                            skel.floor_plane.w, l2k_elevation_degrees(skel.up));
                 }
+                for (i = 0; have_body && i < L2K_SKELETON_SLOTS; i++) {
+                    const l2k_body *b = &body.bodies[i];
+                    char states[L2K_BODY_JOINT_COUNT + 1];
+                    int j;
+                    if (b->state != L2K_SKELETON_TRACKED) continue;
+                    for (j = 0; j < L2K_BODY_JOINT_COUNT; j++) states[j] = (char)('0' + b->joint_state[j]);
+                    states[L2K_BODY_JOINT_COUNT] = 0;
+                    printf("  body slot %d id %u nose (%.2f %.2f %.2f) thumbL (%.2f %.2f %.2f) states %s", i, (unsigned)b->tracking_id,
+                           b->joints[L2K_BODY_NOSE].x, b->joints[L2K_BODY_NOSE].y, b->joints[L2K_BODY_NOSE].z,
+                           b->joints[L2K_BODY_THUMB_LEFT].x, b->joints[L2K_BODY_THUMB_LEFT].y, b->joints[L2K_BODY_THUMB_LEFT].z, states);
+                    break;
+                }
                 printf("\n");
             }
             fflush(stdout);
-            n_skel = n_depth = n_color = n_lost = n_bad = depth_bytes = color_bytes = 0;
+            n_skel = n_body = n_depth = n_color = n_lost = n_bad = depth_bytes = color_bytes = 0;
             last_report = now;
         }
         if (run_seconds > 0 && (double)(now - start) / 1e6 >= run_seconds) break;

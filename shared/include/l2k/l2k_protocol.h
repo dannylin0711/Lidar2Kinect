@@ -41,15 +41,22 @@ enum {
     L2K_PKT_BYE = 0x03,      /* either direction */
     L2K_PKT_SKELETON = 0x10, /* sender -> receiver, one whole skeleton frame */
     L2K_PKT_DEPTH = 0x11,    /* sender -> receiver, one chunk of a depth image */
-    L2K_PKT_COLOR = 0x12     /* sender -> receiver, one chunk of a colour image */
+    L2K_PKT_COLOR = 0x12,    /* sender -> receiver, one chunk of a colour image */
+    L2K_PKT_BODY = 0x13      /* sender -> receiver, one whole 30-joint body frame */
 };
 
 /* Stream bits (l2k_hello.caps = what the sender can produce, l2k_config.streams = what the receiver wants) */
 enum {
     L2K_STREAM_SKELETON = 0x1,
     L2K_STREAM_DEPTH = 0x2, /* 320x240 depth + player index */
-    L2K_STREAM_COLOR = 0x4  /* 640x480 colour, registered to the depth image */
+    L2K_STREAM_COLOR = 0x4, /* 640x480 colour, registered to the depth image */
+    L2K_STREAM_BODY = 0x8   /* 30-joint bodies (l2k_body_frame): Kinect v2's joints and five face points */
 };
+
+/* l2k_config.rate: skeleton / body frames per second the receiver wants. 0 = the sender's default, which is
+ * this (a Kinect's rate). The sender sends at most what was asked, fewer when its source is slower; images
+ * stay at L2K_DEFAULT_RATE at most. */
+#define L2K_DEFAULT_RATE 30
 
 /* Image encodings (l2k_chunk.encoding) */
 enum {
@@ -73,7 +80,8 @@ enum {
     L2K_CONSUMER_MONITOR = 1,     /* debug tool */
     L2K_CONSUMER_SPICE_HOOK = 2,  /* windows: hook DLL loaded by spice2x */
     L2K_CONSUMER_FAKE_KINECT = 3, /* windows: replacement Kinect10.dll */
-    L2K_CONSUMER_GAME_PORT = 4    /* iPad game port receiving from another device */
+    L2K_CONSUMER_GAME_PORT = 4,   /* iPad game port receiving from another device */
+    L2K_CONSUMER_VP4U = 5         /* windows: DanceAround's VisionPoseWrapper.dll replacement (windows/vp4u) */
 };
 
 /* l2k_config.skeleton_flags: same bits as NUI_SKELETON_TRACKING_FLAG_* (informational in v1) */
@@ -102,7 +110,7 @@ typedef struct l2k_config {
     uint8_t consumer_kind;        /* L2K_CONSUMER_* */
     uint8_t depth_mode;           /* L2K_DEPTH_MODE_* */
     uint8_t color_quality;        /* JPEG quality 1..100, 0 = sender default */
-    uint8_t reserved;
+    uint8_t rate;                 /* skeleton / body frames per second, 0 = L2K_DEFAULT_RATE (was reserved, always 0) */
     char name[L2K_NAME_SIZE + 1];
 } l2k_config;
 
@@ -137,6 +145,8 @@ size_t l2k_encode_hello(uint8_t *buf, size_t cap, uint32_t session, uint32_t seq
 size_t l2k_encode_config(uint8_t *buf, size_t cap, uint32_t session, uint32_t seq, const l2k_config *config);
 size_t l2k_encode_bye(uint8_t *buf, size_t cap, uint32_t session, uint32_t seq);
 size_t l2k_encode_skeleton(uint8_t *buf, size_t cap, uint32_t session, uint32_t seq, const l2k_skeleton_frame *frame);
+/* A tracked body takes 412 bytes: two fit one datagram (with four position-only ones), three do not. */
+size_t l2k_encode_body(uint8_t *buf, size_t cap, uint32_t session, uint32_t seq, const l2k_body_frame *frame);
 /* `type` is L2K_PKT_DEPTH or L2K_PKT_COLOR; chunk->payload/chunk_len are copied into the packet. */
 size_t l2k_encode_chunk(uint8_t *buf, size_t cap, uint32_t session, uint32_t seq, uint8_t type, const l2k_chunk *chunk);
 
@@ -151,6 +161,7 @@ int l2k_decode_header(const uint8_t *buf, size_t len, l2k_header *out);
 int l2k_decode_hello(const uint8_t *buf, size_t len, l2k_hello *out);
 int l2k_decode_config(const uint8_t *buf, size_t len, l2k_config *out);
 int l2k_decode_skeleton(const uint8_t *buf, size_t len, l2k_skeleton_frame *out);
+int l2k_decode_body(const uint8_t *buf, size_t len, l2k_body_frame *out);
 int l2k_decode_chunk(const uint8_t *buf, size_t len, l2k_chunk *out);
 
 /* --- image reassembly on the receiver ---

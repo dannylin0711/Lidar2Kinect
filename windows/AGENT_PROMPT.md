@@ -4,6 +4,49 @@ You are picking up the Windows half of **Lidar2Kinect**. This file is your start
 person who opened this session (Danny) owns the project and will answer questions, but everything
 that can be read from the repository or from the game's files you should read yourself.
 
+## DanceAround: what the Apple side added (2026-11-26) — read this first if you work on `vp4u`
+
+The asks 2–4 of `ios/CLAUDE.md` are done in `shared/` and the app (0.10.0), in the layout you proposed;
+`docs/04-status.md` "2026-11-26 (2)" has the details and what was verified. All additions: version 1,
+existing golden packets unchanged, `body.bin` new. Nothing in `windows/` was touched. Until vp4u adopts them
+it keeps getting exactly what it gets today.
+
+What is new in `shared/`:
+
+- `L2K_CONSUMER_VP4U` = 5. `l2k_game_of_consumer(kind)` → `L2K_GAME_DANCEAROUND` for 5, Dance Evolution for
+  every other kind; the app then fits the player into DanceAround's area (1.80–2.80 m, ±0.9 m from the phone,
+  assuming your default `phone_x` 0.55 / `phone_z` 0) and "Best position" puts one player at 2.3 m.
+- `l2k_config.rate` (byte 43, was `reserved`): skeleton / body frames a second wanted, 0 = 30. The app sends
+  up to that rate (60 needs its "Faster camera" on for the camera-only sources); images stay at 30.
+- BODY: `L2K_PKT_BODY` 0x13, `L2K_STREAM_BODY` 0x8, `l2k_body_frame` / `l2k_body` with
+  `L2K_BODY_JOINT_COUNT` 30 in vp4u's joint order (`L2K_BODY_*` = your `VP4U_*`), `l2k_encode_body` /
+  `l2k_decode_body` (`docs/02` §4b). Same header, space, slots, ids and states as SKELETON; same
+  `frame_number` as the SKELETON frame it goes with, sent right after it.
+- `l2k_body_frame_from_skeleton(&skeleton_frame, &body_frame)`: the 30 joints from a SKELETON frame, with
+  the derived joints of your `vp4u_map.cpp` (same formulas and constants, now in `l2k_map.c`, using the
+  frame's `up` instead of a levelled y; identical after levelling). For an older app that offers no BODY.
+- `L2K_SRC_JOINT_COUNT` is now 28 (face and hand points after the 19 skeleton joints;
+  `L2K_SRC_SKELETON_COUNT` 19). `l2k_synth_body` fills them all (the figure's head turns ±20°, only its face
+  shows it), so `tools/smoothcmp.cpp`'s noise loop now also shakes those points — harmless, the Kinect
+  skeleton is built from the first 19 only.
+- `l2k_fake_sender` offers BODY, sends it when asked, and follows CONFIG `rate`; `l2k_dump -s 9 -r 60 -k 5`
+  asks the way vp4u should.
+
+Suggested steps for `windows/vp4u` (your call):
+
+1. `init_module(module, L2K_CONSUMER_VP4U, …)` in `vp4u_wrapper.cpp`.
+2. CONFIG `rate` 60 for vp4u, 0 for `kinect10` / `spicehook` (e.g. a `rate` key in `[vp4u]`, default 60,
+   passed through the core's `send_config`).
+3. Ask for `L2K_STREAM_SKELETON | L2K_STREAM_BODY` (the sender drops what it does not offer); the core decodes
+   BODY (a `hub_body` next to `hub_skeleton`); vp4u uses the BODY frame when it has one for the newest frame
+   number, else `l2k_body_frame_from_skeleton` — one mapping path from `l2k_body_frame`: level, place, mirror
+   the 30 joints. Your derived-joint code can go; the `vp4u_map` test should still hold through
+   `l2k_body_frame_from_skeleton`.
+4. The dispatcher already turns every new frame into one pose frame, so 60 a second needs no change there;
+   the "pose frames/s" log line will show it.
+5. Build `shared/` with MSVC (x86 and x64) and run `test_l2k` (1470 checks on macOS): **not yet built with
+   MSVC**. Then `windows/STATUS.md` and a line in `docs/04-status.md`.
+
 ## What this project is
 
 Dance Evolution Arcade (Konami, build `KDM-2016021900`) is a dance game played with an Xbox 360

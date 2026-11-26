@@ -34,7 +34,7 @@ list it. This is optional; the address can always be typed into the app.
 | 8 | u32 | session | random number chosen when the program starts; a different value means the peer restarted |
 | 12 | u32 | seq | +1 for every packet this program sends, of any type (loss counting) |
 
-Types: `0x01` HELLO, `0x02` CONFIG, `0x03` BYE, `0x10` SKELETON, `0x11` DEPTH, `0x12` COLOR.
+Types: `0x01` HELLO, `0x02` CONFIG, `0x03` BYE, `0x10` SKELETON, `0x11` DEPTH, `0x12` COLOR, `0x13` BODY.
 A receiver ignores packets with a wrong magic, another version, or a type it does not know.
 
 ## 3. Session
@@ -70,13 +70,21 @@ HELLO once it knows the sender's address.
 | 24 | u64 | receiver_time_us — the receiver's clock now |
 | 32 | u32 | streams — stream bits wanted |
 | 36 | u32 | skeleton_flags — the game's `NUI_SKELETON_TRACKING_FLAG_*` bits (informational in version 1) |
-| 40 | u8 | consumer_kind — 0 unknown, 1 monitor, 2 spice2x hook, 3 fake Kinect10.dll, 4 game port |
+| 40 | u8 | consumer_kind — 0 unknown, 1 monitor, 2 spice2x hook, 3 fake Kinect10.dll, 4 game port, 5 DanceAround's vp4u wrapper |
 | 41 | u8 | depth_mode — 0 depth on player pixels only, 1 full depth |
 | 42 | u8 | color_quality — JPEG quality 1…100, 0 = sender's default |
-| 43 | u8 | reserved, 0 |
+| 43 | u8 | rate — SKELETON / BODY frames per second wanted, 0 = the sender's default, 30 (until 2026-11-26 this byte was reserved and always 0) |
 | 44 | char[32] | name |
 
-Stream bits: `0x1` skeleton, `0x2` depth + player index (320×240), `0x4` colour (640×480).
+Stream bits: `0x1` skeleton, `0x2` depth + player index (320×240), `0x4` colour (640×480), `0x8` 30-joint
+bodies (§4b).
+
+**consumer_kind** tells the sender which game it feeds: kind 5 is DanceAround, every other kind Dance
+Evolution. The app takes that game's play area and standing point (`docs/03` "Play area").
+
+**rate.** The sender sends at most this many SKELETON and BODY frames a second, fewer when its source is
+slower (a camera at 30 frames a second gives 30). Images (DEPTH, COLOR) stay at 30 a second at most. A
+Kinect game keeps 0; DanceAround's cameras ran at 60.
 
 ## 4. SKELETON (type 0x10)
 
@@ -114,6 +122,40 @@ A frame with more tracked bodies than fit in 1248 bytes (five or more) cannot be
 sender tracks at most two, like a Kinect.
 
 The receiver keeps the frame with the highest `frame_number` and drops older ones that arrive late.
+
+## 4b. BODY (type 0x13)
+
+The same frame as SKELETON with 30 joints per body: Kinect v2's 25 joints and five face points, the
+joint set of DanceAround's vp4u interface (`windows/docs/vp4u-interface.md` §3). Sent for every frame
+the receiver asked BODY for, straight after that frame's SKELETON when both are asked for; a receiver
+may ask for BODY alone. Same space, units, left / right, slots, tracking ids, states and positions as
+SKELETON; `frame_number` is the skeleton frame's.
+
+Offsets 16–63 are SKELETON's (timestamp_us, frame_number, flags, floor plane, up, body_count,
+source_kind, reserved). Body record:
+
+| Type | Field |
+|---|---|
+| u8 | slot |
+| u8 | state — 1 position only, 2 tracked |
+| u16 | quality |
+| u32 | tracking_id |
+| f32[3] | position |
+| f32[30][3] | joint positions — **only when state = 2** |
+| u8[30] | joint states — **only when state = 2** |
+| u16 | reserved, 0 — **only when state = 2** (keeps the next record 4-byte aligned) |
+
+A position-only record is 20 bytes, a tracked one 412. Two tracked bodies fit one datagram with four
+position-only ones (968 bytes); three tracked do not, and a sender with three sends the third as
+position only.
+
+Joint order (Kinect v2's `JointType`, then the face): 0 spine base, 1 spine mid, 2 neck, 3 head,
+4–7 left shoulder, elbow, wrist, hand, 8–11 the same on the right, 12–15 left hip, knee, ankle,
+foot, 16–19 the same on the right, 20 spine shoulder, 21 left hand tip, 22 left thumb, 23 right hand
+tip, 24 right thumb, 25 nose, 26 left eye, 27 right eye, 28 left ear, 29 right ear. Joints 0–19 are
+SKELETON's joints 0–19 except joint 2: SKELETON's shoulder centre is BODY's spine shoulder (20), and
+BODY's neck lies between it and the head. How the ten other joints are made: `docs/03` "The 30-joint
+body".
 
 ## 5. DEPTH and COLOR (types 0x11, 0x12)
 
@@ -158,13 +200,16 @@ pixel (x, y).
 ## 6. Rates and sizes
 
 Measured with the synthetic two-player figure on a local connection: skeleton 30 packets/s of
-624 bytes; depth 30 images/s of about 10 kB (9 packets). Colour depends on the picture: the test
+624 bytes; depth 30 images/s of about 10 kB (9 packets). BODY: 476 bytes for one player, 888 for two;
+at 60 frames a second one player's SKELETON (344 bytes) and BODY together are about 49 kB/s. Colour depends on the picture: the test
 card is 8–11 kB; camera images at quality 60 have not been measured yet and are expected to be
 30–60 kB (25–50 packets), which would put the total at 1.2–2.1 MB/s.
 
 ## 7. Changing the protocol
 
 - Adding a stream bit, an encoding value, a `source_kind` or a `consumer_kind` is compatible:
-  old peers ignore what they do not ask for.
+  old peers ignore what they do not ask for. So is adding a packet type (a receiver ignores a type
+  it does not know) and giving a reserved field a meaning whose 0 is the old behaviour (CONFIG
+  `rate`, 2026-11-26): the version stays 1.
 - Any change to an existing layout needs a new `version`, new golden packets, and an entry in
   `docs/04-status.md` so both sides move together.

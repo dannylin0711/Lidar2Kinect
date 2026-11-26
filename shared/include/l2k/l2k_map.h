@@ -36,8 +36,25 @@ enum {
     L2K_SRC_KNEE_RIGHT = 16,
     L2K_SRC_ANKLE_RIGHT = 17,
     L2K_SRC_TOE_RIGHT = 18,
-    L2K_SRC_JOINT_COUNT = 19
+    /* Face and hand points, all optional. They go only into the 30-joint body (l2k_mapper_body_frame); the Kinect
+     * v1 skeleton is the same with or without them. Missing ones are placed from the skeleton (docs/03). */
+    L2K_SRC_NOSE = 19,
+    L2K_SRC_EYE_LEFT = 20,
+    L2K_SRC_EYE_RIGHT = 21,
+    L2K_SRC_EAR_LEFT = 22,
+    L2K_SRC_EAR_RIGHT = 23,
+    L2K_SRC_HAND_TIP_LEFT = 24, /* tip of the middle finger */
+    L2K_SRC_THUMB_LEFT = 25,    /* tip of the thumb */
+    L2K_SRC_HAND_TIP_RIGHT = 26,
+    L2K_SRC_THUMB_RIGHT = 27,
+    L2K_SRC_JOINT_COUNT = 28
 };
+/* The source joints the Kinect v1 skeleton is made from: 0 .. L2K_SRC_SKELETON_COUNT-1. */
+#define L2K_SRC_SKELETON_COUNT 19
+
+/* The 30-joint body's joints that the Kinect v1 skeleton has no place for: neck, hand tips, thumbs, nose, eyes,
+ * ears (in this order; the mapper keeps them per slot, see l2k_mapper_body_frame). */
+#define L2K_BODY_EXTRA_COUNT 10
 
 /* One body from the source, in source camera space: +x image right, +y image up,
  * +z towards the viewer (the camera looks along -z), metres. This is ARKit's camera space. */
@@ -119,6 +136,22 @@ typedef struct l2k_map_params {
 
 void l2k_map_params_default(l2k_map_params *params);
 
+/* The games a receiver can feed. Each has its own play area and standing point (docs/03 "Play area"). */
+enum {
+    L2K_GAME_DANCE_EVOLUTION = 0, /* Dance Evolution Arcade, through a Kinect v1 (docs/01) */
+    L2K_GAME_DANCEAROUND = 1      /* DanceAround, through windows/vp4u (windows/docs/vp4u-interface.md) */
+};
+
+/* The game behind a receiver's CONFIG consumer_kind: DanceAround for L2K_CONSUMER_VP4U, Dance Evolution for every
+ * other kind (unknown included, as before consumer kind 5 existed). */
+int l2k_game_of_consumer(uint8_t consumer_kind);
+
+/* Set the play area (area_*) and the standing point (norm_distance, norm_spacing, norm_reach) of `game`; the other
+ * fields are left alone. Dance Evolution's are the defaults of l2k_map_params_default. DanceAround's: its play area is
+ * 1.80 to 2.81 m from the phone and 0.9 m either side of the phone's axis (with windows/vp4u's default placement of
+ * the phone), its standing point 2.3 m away; it takes one player, the nearest (the caller keeps norm_players at 1). */
+void l2k_map_params_set_game(l2k_map_params *params, int game);
+
 /* Normalising. Dance Evolution places its world 2.5 m in front of the sensor (docs/01 section 7): that is the
  * middle of the box a player must stand in, and where its dancer stands. Its two-player rule expects the players
  * 0.61 m either side of the middle. With `normalize` the mapper reports, whatever the room looks like:
@@ -158,6 +191,13 @@ typedef struct l2k_mapper {
         l2k_vec3 offset[L2K_JOINT_COUNT];
         uint8_t valid[L2K_JOINT_COUNT];
     } memory[L2K_SKELETON_SLOTS];
+    /* per slot: the 30-joint body's joints the skeleton has no place for (L2K_BODY_EXTRA_COUNT), for the frame last
+     * mapped (`extra`) and with the last tracked skeleton (`last_extra`, for the hold). The hold, the fit and the
+     * normalising move them with the skeleton. */
+    struct {
+        l2k_vec3 p[L2K_BODY_EXTRA_COUNT];
+        uint8_t state[L2K_BODY_EXTRA_COUNT];
+    } extra[L2K_SKELETON_SLOTS], last_extra[L2K_SKELETON_SLOTS];
 } l2k_mapper;
 
 /* params may be NULL for the defaults. */
@@ -172,6 +212,18 @@ void l2k_mapper_set_floor(l2k_mapper *m, float sensor_height_m);
  *   quadrant  : device roll in quarter turns, see l2k_quadrant_from_up() in l2k_depth.h */
 void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l2k_vec3 up_camera,
                     int quadrant, uint64_t timestamp_us, uint8_t source_kind, l2k_skeleton_frame *out);
+
+/* The 30-joint body frame of `frame`, the frame l2k_mapper_map just produced: the skeleton's 20 joints (Kinect v1's
+ * shoulder centre as SPINE_SHOULDER), and the ten others from the source's face and hand points where it gave them,
+ * placed from the skeleton where it did not. Header, slots, states, ids and positions are the skeleton frame's.
+ * If `frame` is not the mapper's last frame, every extra joint is placed from the skeleton. */
+void l2k_mapper_body_frame(const l2k_mapper *m, const l2k_skeleton_frame *frame, l2k_body_frame *out);
+
+/* The 30-joint body frame of any skeleton frame (a receiver given only SKELETON): the ten joints Kinect v1 does not
+ * have are placed from the skeleton and reported INFERRED (docs/03 "The 30-joint body"). */
+void l2k_body_frame_from_skeleton(const l2k_skeleton_frame *frame, l2k_body_frame *out);
+/* The same for one slot; `up` is the frame's up vector. */
+void l2k_body_from_skeleton(const l2k_skeleton *skeleton, l2k_vec3 up, l2k_body *out);
 
 /* Sensor tilt in degrees from a frame's `up` vector: positive = looking upwards
  * (what NuiCameraElevationGetAngle reports). */

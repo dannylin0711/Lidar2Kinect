@@ -90,7 +90,22 @@ final class SensorModel: ObservableObject {
         }
     }
     @Published var sourceError: String?
-    @Published var senderStatus = L2KSender.Status()
+    @Published var senderStatus = L2KSender.Status() {
+        didSet {
+            // The game follows the receiver (its consumer kind); it stays when the receiver goes, so the play area
+            // does not change under a player during a short silence.
+            if senderStatus.state == .streaming {
+                let fed = L2KGame(consumerKind: senderStatus.consumerKind)
+                if fed != game { game = fed }
+            }
+        }
+    }
+    /// The game the skeleton is meant for: the connected receiver's (DanceAround for windows/vp4u), else the last one,
+    /// else Dance Evolution (-l2kGame 1: DanceAround until a receiver says otherwise). The session applies the same
+    /// choice to the pipeline itself.
+    @Published private(set) var game: L2KGame
+    /// Frames per second the source can deliver as it runs now (the camera's rate).
+    var sourceFrameRate: Double { session.source?.maxFrameRate ?? L2K.defaultRate }
     @Published var receivers: [L2KDiscovery.Receiver] = []
     /// The colour preview shows the camera's whole view, not only the part the Kinect's image covers.
     private var showsWholeCamera = false
@@ -171,10 +186,12 @@ final class SensorModel: ObservableObject {
         normalize = defaults.bool(forKey: "l2kNormalize") // -l2kNormalize 1
         normalizePlayers = defaults.object(forKey: "l2kNormalizePlayers") as? Int ?? 1 // -l2kNormalizePlayers 2
         fitPlayArea = defaults.object(forKey: "l2kFitArea") as? Bool ?? true // -l2kFitArea 0
+        game = L2KGame(rawValue: Int32(defaults.integer(forKey: "l2kGame"))) ?? .danceEvolution // -l2kGame 1: DanceAround
         let keepsView = Self.fastCameraKeepsView(wanted.flatMap { sources.contains($0) ? $0 : nil } ?? sources[0])
         fastCameraKeepsView = keepsView
         fastCamera = defaults.object(forKey: "l2kFastCamera") as? Bool ?? keepsView // -l2kFastCamera 0 | 1
         session.pipeline.fitPlayArea = fitPlayArea
+        session.pipeline.game = game
         // -l2kImagesFollow 0: the game's images are always the middle of the camera picture, as before 0.9.2
         session.pipeline.imagesFollowSkeleton = defaults.object(forKey: "l2kImagesFollow") == nil || defaults.bool(forKey: "l2kImagesFollow")
         session.pipeline.normalize = normalize
@@ -237,7 +254,7 @@ final class SensorModel: ObservableObject {
         let screenLine = String(format: "L2K-LOG   Screen: %.0f pictures per second, the main queue up to %.0f ms behind",
                                 lastLog > 0 ? Double(screen.shown) / (now - lastLog) : 0, screen.late * 1000)
         lastLog = now
-        var lines = ["L2K-LOG source=\(sourceChoice.rawValue) upper=\(upperBodyOnly) out=\(String(format: "%.0f", rate))fps tracked=\(skeleton.trackedSkeletons.count) tilt=\(String(format: "%.0f", skeleton.elevationDegrees)) floor=\(String(format: "%.2f", skeleton.floor_plane.w)) | \(live.sourceStatus)"]
+        var lines = ["L2K-LOG source=\(sourceChoice.rawValue) game=\(game.name) asked=\(senderStatus.rate)fps upper=\(upperBodyOnly) out=\(String(format: "%.0f", rate))fps tracked=\(skeleton.trackedSkeletons.count) tilt=\(String(format: "%.0f", skeleton.elevationDegrees)) floor=\(String(format: "%.2f", skeleton.floor_plane.w)) | \(live.sourceStatus)"]
         if let body = skeleton.trackedSkeletons.first?.skeleton {
             let h = body.position(of: .head), l = body.position(of: .handLeft), r = body.position(of: .handRight), f = body.position(of: .footLeft)
             lines.append(String(format: "L2K-LOG   head (%.2f %.2f %.2f) handL (%.2f %.2f %.2f) handR (%.2f %.2f %.2f) footL (%.2f %.2f %.2f) states %@",

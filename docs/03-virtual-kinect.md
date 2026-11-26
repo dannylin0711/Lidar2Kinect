@@ -151,6 +151,24 @@ It replaces the fit when on. `l2k_mapper.picture` keeps every skeleton as it was
 the normalising, for drawing over the camera picture. Not yet tried in the game: whether any judge
 depends on where the player stands rather than on the pose is not read from the DLL.
 
+**The game decides the play area (since 2026-11-26).** The box above and the 2.5 m standing point
+are Dance Evolution's. DanceAround (`windows/vp4u`) takes a player whose spine base is 1.80–2.81 m
+from the phone and within 0.9 m of its axis (its play area with windows/vp4u's default placement of
+the phone, `windows/docs/vp4u-interface.md` §5), and it takes one player, the nearest. The receiver
+says which game it feeds by its CONFIG `consumer_kind` (5 = DanceAround, anything else = Dance
+Evolution; `l2k_game_of_consumer`), and `l2k_map_params_set_game` sets the play area and the standing
+point to match:
+
+| | fit keeps the hips within | standing point | reach | players |
+|---|---|---|---|---|
+| Dance Evolution | 1.90–3.10 m, ±1.15 m | 2.5 m (two players ±0.61 m) | 0.5 m | 1 or 2 |
+| DanceAround | 1.90–2.70 m, ±0.80 m | 2.3 m | 0.4 m | 1 |
+
+The app follows the connected receiver (`L2KSession` sets `L2KPipeline.game`) and keeps the last
+receiver's game while none is connected; `-l2kGame 1` starts it on DanceAround. If `phone_x` /
+`phone_z` in windows/vp4u's `l2k.ini` move the phone, DanceAround's box moves with them and the app
+does not know: the fit then keeps to the wrong box.
+
 Quality bits: a joint beyond 97 % of the half field of view sets the matching clipped-edge bit.
 Which side the SDK calls "left" and "right" is taken to be the image's left and right — not yet
 checked against a real sensor.
@@ -162,6 +180,45 @@ floor. `l2k_mapper_set_floor` replaces the estimate with a measured height.
 
 **Elevation angle** (`l2k_elevation_degrees`): `asin(up.z)`, positive when the sensor looks
 upwards.
+
+## 4b. The 30-joint body
+
+DanceAround's skeleton is Kinect v2's 25 joints and five face points (`docs/02` §4b,
+`l2k_body_frame`). The mapper makes it from the same frame as the Kinect v1 skeleton
+(`l2k_mapper_body_frame`): same slots, ids, states, positions, fit, normalising and hold.
+
+- Joints 0–19 are the skeleton's joints; the skeleton's shoulder centre is the body's spine shoulder.
+- Ten more: the neck, both hand tips and thumbs, the nose, eyes and ears. A capture source may give
+  the last nine (`L2K_SRC_NOSE` … `L2K_SRC_THUMB_RIGHT`); they are then sent with the source's
+  confidence (2 tracked, 1 inferred). The Kinect v1 skeleton is the same with or without them.
+- Whatever the source does not give is placed from the skeleton and reported **inferred**:
+
+| Joint | From |
+|---|---|
+| neck | shoulder centre + 0.35 × (head − shoulder centre) |
+| hand tip | hand + 1.2 × (hand − wrist) |
+| thumb | wrist + 0.8 × (hand − wrist) + 3 cm forward |
+| nose | head + 8.5 cm forward − 2 cm up |
+| eyes | head + 7.5 cm forward + 3 cm up ± 3.2 cm sideways |
+| ears | head ± 7.5 cm sideways − 1 cm forward |
+
+  "Forward" is where the shoulders face (perpendicular to the level shoulder line), "sideways" the
+  player's right. These are the Windows side's first estimates (they were `windows/vp4u/vp4u_map.cpp`'s),
+  moved here so both ends use the same; not compared with VisionPose or a Kinect v2.
+- A receiver given only SKELETON gets the same derived joints with `l2k_body_frame_from_skeleton`.
+- The hold, the fit and the normalising move the ten joints with the skeleton; a held body's are
+  reported inferred.
+
+What the capture sources give:
+
+| Source | Face | Hand tips, thumbs |
+|---|---|---|
+| LiDAR depth | Vision 2D nose, eyes, ears, lifted with the depth map (nose and ears on the surface, eyes 1 cm behind it) | placed |
+| Ultra-wide, front camera | Vision 2D nose, eyes, ears, each on its own ray at a typical distance from the head centre as placed (nose and eyes 8.7 cm, on the camera's side; ears 7.6 cm, beside the head) | placed |
+| Body tracking (ARKit) | ARKit's nose and eye joints, inferred unless ARKit tracks them | placed (ARKit's hand joints follow the forearm) |
+| Synthetic figure | its own: the head turns ±20° from side to side, which only the face shows | its own |
+
+Not measured: whether DanceAround uses the face or the hands for anything but drawing.
 
 ## 5. Smoothing
 
@@ -330,7 +387,10 @@ skeleton's way:
 - *A 60 fps camera, 30 skeletons a second* (`UltraWideSource(captureRate: 60)`). The camera runs
   at 60 frames a second in its widest format that fast; the body is still detected 30 times a
   second, on every second frame (`L2KCameraView.usesFrame`), so the game's smoothing sees the
-  Kinect's rate. A frame of a 60 fps stream reaches the app sooner after its exposure. The fast
+  Kinect's rate. A receiver that asks for more (CONFIG `rate`, DanceAround: 60) gets it: the session
+  asks the source for that rate (`L2KSource.requestFrameRate`) and the body is detected on every
+  frame Vision keeps up with; the images stay at 30 a second. With the camera at 30 the receiver gets
+  30, and the app says so. A frame of a 60 fps stream reaches the app sooner after its exposure. The fast
   format can show less (`UltraWideSource.fastCameraKeepsView`); the app turns the faster camera on
   by itself only where it shows the same ("Faster camera", `-l2kFastCamera 0|1`).
 

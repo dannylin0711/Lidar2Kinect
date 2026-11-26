@@ -24,6 +24,15 @@ final class L2KKitTests: XCTestCase {
         XCTAssertEqual(tracked[0].skeleton.position(of: .head).z, 2.0 + 3.0 / 128.0)
         XCTAssertEqual(frame.slots[4].state, UInt8(L2K_SKELETON_POSITION_ONLY))
 
+        // the 30-joint body packet
+        let bodyPacket = try Data(contentsOf: vectors.appendingPathComponent("body.bin"))
+        var body = l2k_body_frame()
+        XCTAssertEqual(bodyPacket.withUnsafeBytes { l2k_decode_body($0.bindMemory(to: UInt8.self).baseAddress, $0.count, &body) }, 0)
+        XCTAssertEqual(body.frame_number, 1234)
+        XCTAssertEqual(body.trackedBodies.map(\.slot), [2])
+        XCTAssertEqual(body.trackedBodies[0].body.jointPositions[Int(L2K_BODY_EAR_RIGHT)].z, 2.0 + 29.0 / 256.0)
+        XCTAssertEqual(body.slots[0].state, UInt8(L2K_SKELETON_POSITION_ONLY))
+
         let hello = try Data(contentsOf: vectors.appendingPathComponent("hello.bin"))
         var decoded = l2k_hello()
         XCTAssertEqual(hello.withUnsafeBytes { l2k_decode_hello($0.bindMemory(to: UInt8.self).baseAddress, $0.count, &decoded) }, 0)
@@ -689,7 +698,8 @@ final class L2KKitTests: XCTestCase {
         let people = VisionBodyDetector().detect(in: pixels, quadrant: 0)
         print("L2K-VISION 2D people: \(people.count)")
         for person in people {
-            print("L2K-VISION 2D " + person.joints.map { String(format: "%d:(%.2f,%.2f)", $0.source, $0.u, $0.v) }.joined(separator: " "))
+            print("L2K-VISION 2D " + person.joints.map { String(format: "%d:(%.2f,%.2f)", $0.source, $0.u, $0.v) }.joined(separator: " ")
+                  + " face " + person.face.map { String(format: "%d:(%.2f,%.2f)", $0.source, $0.u, $0.v) }.joined(separator: " "))
         }
         let detector = VisionBody3DDetector()
         let joints = detector.detect(in: pixels, quadrant: 0)
@@ -703,9 +713,10 @@ final class L2KKitTests: XCTestCase {
 
     /// With the colour stream switched off the sender does not offer it and never sends it, even to a receiver that asks.
     func testColourCanBeSwitchedOff() throws {
-        XCTAssertEqual(L2KSession.capabilities(providesImages: true, colorEnabled: true), L2K.streamSkeleton | L2K.streamDepth | L2K.streamColor)
-        XCTAssertEqual(L2KSession.capabilities(providesImages: true, colorEnabled: false), L2K.streamSkeleton | L2K.streamDepth)
-        XCTAssertEqual(L2KSession.capabilities(providesImages: false, colorEnabled: true), L2K.streamSkeleton | L2K.streamDepth)
+        let always = L2K.streamSkeleton | L2K.streamBody | L2K.streamDepth
+        XCTAssertEqual(L2KSession.capabilities(providesImages: true, colorEnabled: true), always | L2K.streamColor)
+        XCTAssertEqual(L2KSession.capabilities(providesImages: true, colorEnabled: false), always)
+        XCTAssertEqual(L2KSession.capabilities(providesImages: false, colorEnabled: true), always)
 
         let listener = try NWListener(using: .udp, on: .any)
         let queue = DispatchQueue(label: "test.receiver.nocolour")
@@ -767,7 +778,7 @@ final class L2KKitTests: XCTestCase {
         lock.lock()
         defer { lock.unlock() }
         XCTAssertEqual(colourPackets, 0)
-        XCTAssertEqual(offered, L2K.streamSkeleton | L2K.streamDepth)
+        XCTAssertEqual(offered, L2K.streamSkeleton | L2K.streamBody | L2K.streamDepth)
     }
 
     /// Picture positions + bone lengths + "towards or away" give back the 3D body they came from.
@@ -1021,5 +1032,220 @@ final class L2KKitTests: XCTestCase {
         session.sender.disconnect()
         session.stop()
         listener.cancel()
+    }
+
+    /// A receiver like windows/vp4u (consumer kind 5) asking for skeletons and 30-joint bodies at 60 frames a second, and
+    /// depth: it gets 60 skeletons and 60 bodies a second, the depth image at 30, DanceAround's play area is chosen.
+    func testDanceAroundReceiverGetsBodiesAtSixty() throws {
+        let listener = try NWListener(using: .udp, on: .any)
+        let queue = DispatchQueue(label: "test.receiver.vp4u")
+        var skeletons: [UInt32: Double] = [:], bodies: [UInt32: Double] = [:], depths: [Double] = []
+        var lastBody = l2k_body_frame()
+        var storage = [UInt8](repeating: 0, count: 320 * 240 * 3)
+        var assembler = l2k_assembler()
+        storage.withUnsafeMutableBufferPointer { l2k_assembler_init(&assembler, $0.baseAddress, $0.count) }
+        var receiverSeq: UInt32 = 0
+        var first: Double?
+        var finished = false
+        let done = expectation(description: "1.6 s of frames")
+
+        func handle(_ data: Data, on connection: NWConnection) {
+            let now = ProcessInfo.processInfo.systemUptime
+            data.withUnsafeBytes { raw in
+                let bytes = raw.bindMemory(to: UInt8.self).baseAddress!
+                var header = l2k_header()
+                guard l2k_decode_header(bytes, raw.count, &header) == L2K_OK else { return XCTFail("bad header") }
+                switch Int32(header.type) {
+                case Int32(L2K_PKT_HELLO):
+                    var hello = l2k_hello()
+                    XCTAssertEqual(l2k_decode_hello(bytes, raw.count, &hello), 0)
+                    XCTAssertNotEqual(hello.caps & L2K.streamBody, 0)
+                    var config = l2k_config()
+                    config.echo_sender_time_us = hello.sender_time_us
+                    config.streams = L2K.streamSkeleton | L2K.streamBody | L2K.streamDepth
+                    config.consumer_kind = UInt8(L2K_CONSUMER_VP4U)
+                    config.rate = 60
+                    l2kSetName(&config.name, "vp4u test")
+                    var packet = [UInt8](repeating: 0, count: 128)
+                    receiverSeq += 1
+                    let n = l2k_encode_config(&packet, 128, 77, receiverSeq, &config)
+                    connection.send(content: Data(packet[0..<n]), completion: .idempotent)
+                case Int32(L2K_PKT_SKELETON):
+                    var frame = l2k_skeleton_frame()
+                    XCTAssertEqual(l2k_decode_skeleton(bytes, raw.count, &frame), 0)
+                    if first == nil { first = now }
+                    skeletons[frame.frame_number] = now
+                case Int32(L2K_PKT_BODY):
+                    var frame = l2k_body_frame()
+                    XCTAssertEqual(l2k_decode_body(bytes, raw.count, &frame), 0)
+                    bodies[frame.frame_number] = now
+                    lastBody = frame
+                case Int32(L2K_PKT_DEPTH):
+                    var chunk = l2k_chunk()
+                    XCTAssertEqual(l2k_decode_chunk(bytes, raw.count, &chunk), 0)
+                    if l2k_assembler_push(&assembler, &chunk) == 1 { depths.append(now) }
+                case Int32(L2K_PKT_COLOR):
+                    XCTFail("colour was not asked for")
+                default:
+                    break
+                }
+                if let first, now - first > 1.6, !finished { // on `queue` only
+                    finished = true
+                    done.fulfill()
+                }
+            }
+        }
+        func receive(on connection: NWConnection) {
+            connection.receiveMessage { data, _, _, error in
+                if let data, !data.isEmpty { handle(data, on: connection) }
+                if error == nil { receive(on: connection) }
+            }
+        }
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: queue)
+            receive(on: connection)
+        }
+        let ready = expectation(description: "listener ready")
+        listener.stateUpdateHandler = { if case .ready = $0 { ready.fulfill() } }
+        listener.start(queue: queue)
+        wait(for: [ready], timeout: 5)
+        let port = try XCTUnwrap(listener.port?.rawValue)
+
+        let session = L2KSession()
+        session.deviceName = "unit test"
+        let streaming = expectation(description: "streaming")
+        streaming.assertForOverFulfill = false
+        session.sender.onStatus = { status in
+            if status.state == .streaming {
+                XCTAssertEqual(status.consumerKind, UInt8(L2K_CONSUMER_VP4U))
+                XCTAssertEqual(status.rate, 60)
+                streaming.fulfill()
+            }
+        }
+        try session.start(SyntheticSource(players: 1))
+        session.sender.connect(host: "127.0.0.1", port: port)
+        wait(for: [streaming, done], timeout: 15)
+        session.sender.disconnect()
+        session.stop()
+        listener.cancel()
+
+        queue.sync {
+            // the last second of what arrived, leaving out the first half second (the rate changes at the first CONFIG)
+            let from = (first ?? 0) + 0.5, to = from + 1
+            let skeletonRate = skeletons.values.filter { $0 >= from && $0 < to }.count
+            let bodyRate = bodies.values.filter { $0 >= from && $0 < to }.count
+            let depthRate = depths.filter { $0 >= from && $0 < to }.count
+            print("L2K-VP4U skeletons \(skeletonRate)/s, bodies \(bodyRate)/s, depth images \(depthRate)/s")
+            XCTAssertGreaterThanOrEqual(skeletonRate, 50)
+            XCTAssertGreaterThanOrEqual(bodyRate, 50)
+            XCTAssertLessThanOrEqual(depthRate, 31)
+            XCTAssertGreaterThanOrEqual(depthRate, 20)
+            // every body frame is a skeleton frame's
+            XCTAssertTrue(Set(bodies.keys).isSubset(of: Set(skeletons.keys).union(bodies.keys.filter { $0 > (skeletons.keys.max() ?? 0) })))
+            let tracked = lastBody.trackedBodies
+            XCTAssertEqual(tracked.count, 1)
+            if let body = tracked.first?.body {
+                let states = body.jointStates
+                XCTAssertEqual(states[Int(L2K_BODY_NOSE)], UInt8(L2K_JOINT_TRACKED)) // the figure's own face
+                XCTAssertEqual(states[Int(L2K_BODY_NECK)], UInt8(L2K_JOINT_INFERRED)) // always placed
+                XCTAssertFalse(states.contains(UInt8(L2K_JOINT_NOT_TRACKED)))
+            }
+        }
+        XCTAssertEqual(session.pipeline.game, .danceAround)
+    }
+
+    func testFrameRateAskedFor() {
+        XCTAssertEqual(L2KSession.frameRate(asked: 0, otherwise: 30), 30)
+        XCTAssertEqual(L2KSession.frameRate(asked: 60, otherwise: 30), 60)
+        XCTAssertEqual(L2KSession.frameRate(asked: 250, otherwise: 30), 120)
+        XCTAssertTrue(L2KCameraView.usesFrame(at: 1 + 1.0 / 60, last: 1, rate: 60))
+        XCTAssertFalse(L2KCameraView.usesFrame(at: 1 + 1.0 / 60, last: 1, rate: 30))
+    }
+
+    /// The receiver's game chooses the play area of the fit and the standing point of "Best position"; DanceAround is told
+    /// about one player.
+    func testGameChoosesThePlayArea() {
+        func body(at distance: Float, x: Float, player: Int32 = 0, players: Int32 = 1) -> l2k_src_body {
+            var b = l2k_src_body()
+            l2k_synth_body(0, player, players, &b)
+            withUnsafeMutableBytes(of: &b.p) { raw in
+                for i in raw.bindMemory(to: l2k_vec3.self).indices {
+                    raw.bindMemory(to: l2k_vec3.self)[i].z += 2.5 - distance // camera space: the camera looks along -z
+                    raw.bindMemory(to: l2k_vec3.self)[i].x -= x              // camera +x is the Kinect's -x
+                }
+            }
+            return b
+        }
+        let camera = l2k_src_camera(fxn: L2K_FOCAL_320 / 320, fyn: L2K_FOCAL_320 / 240, cxn: 0.5, cyn: 0.5)
+        func frame(_ bodies: [l2k_src_body], t: Double) -> L2KSourceFrame {
+            L2KSourceFrame(timestamp: t, bodies: bodies, upCamera: SIMD3(0, 1, 0), camera: camera)
+        }
+        // 3.0 m away, 1.0 m to the side: inside Dance Evolution's area, outside DanceAround's
+        let pipeline = L2KPipeline()
+        pipeline.fitPlayArea = true
+        var sent = pipeline.skeletonFrame(frame([body(at: 3.0, x: 1.0)], t: 1), kind: 0).skeleton.trackedSkeletons[0].skeleton
+        XCTAssertGreaterThan(sent.position.z, 2.9)
+        XCTAssertGreaterThan(sent.position.x, 0.95)
+        pipeline.game = .danceAround
+        sent = pipeline.skeletonFrame(frame([body(at: 3.0, x: 1.0)], t: 1.033), kind: 0).skeleton.trackedSkeletons[0].skeleton
+        XCTAssertEqual(sent.position.z, 2.70, accuracy: 1e-4)
+        XCTAssertEqual(sent.position.x, 0.80, accuracy: 1e-4)
+        XCTAssertEqual(L2KGame.danceAround.playAreaNear, 1.80, accuracy: 1e-6)
+        XCTAssertEqual(L2KGame.danceAround.playAreaFar, 2.80, accuracy: 1e-6)
+        XCTAssertEqual(L2KGame.danceEvolution.playAreaFar, L2KPipeline.playAreaFar, accuracy: 1e-6)
+        XCTAssertEqual(L2KGame.danceEvolution.playAreaHalfWidth, L2KPipeline.playAreaHalfWidth, accuracy: 1e-6)
+        XCTAssertEqual(L2KGame(consumerKind: UInt8(L2K_CONSUMER_VP4U)), .danceAround)
+        XCTAssertEqual(L2KGame(consumerKind: UInt8(L2K_CONSUMER_UNKNOWN)), .danceEvolution)
+
+        // "Best position" with two players asked for: Dance Evolution gets both at 2.5 m, DanceAround one at 2.3 m
+        let two = [body(at: 2.6, x: -0.6, player: 0, players: 2), body(at: 2.6, x: 0.6, player: 1, players: 2)]
+        let normalising = L2KPipeline()
+        normalising.normalize = true
+        normalising.normalizePlayers = 2
+        var result = normalising.skeletonFrame(frame(two, t: 2), kind: 0)
+        XCTAssertEqual(result.skeleton.trackedSkeletons.count, 2)
+        XCTAssertEqual(result.skeleton.trackedSkeletons[0].skeleton.position.z, 2.5, accuracy: 1e-3)
+        normalising.game = .danceAround
+        result = normalising.skeletonFrame(frame(two, t: 2.033), kind: 0)
+        XCTAssertEqual(result.skeleton.trackedSkeletons.count, 1)
+        XCTAssertEqual(result.skeleton.trackedSkeletons[0].skeleton.position.z, 2.3, accuracy: 1e-3)
+        XCTAssertEqual(result.skeleton.trackedSkeletons[0].skeleton.position.x, 0, accuracy: 1e-3)
+        // the body stream follows: same slot, same place
+        XCTAssertEqual(result.body.trackedBodies.map(\.slot), result.skeleton.trackedSkeletons.map(\.slot))
+        XCTAssertEqual(result.body.trackedBodies[0].body.position.z, 2.3, accuracy: 1e-3)
+    }
+
+    /// Face points of a camera without depth: on their rays, a head's size from the head centre; nose and eyes towards
+    /// the camera, ears beside the head.
+    func testFaceAroundTheHead() {
+        let camera = l2k_src_camera(fxn: 0.6, fyn: 0.8, cxn: 0.5, cyn: 0.5)
+        let head = VisionJoint3D(source: Int(L2K_SRC_HEAD), u: 0.5, v: 0.3, depth: 2.4)
+        let centre = VisionKinematics.point(u: head.u, v: head.v, depth: head.depth, camera: camera)
+        // where a face 2.4 m away, turned to the camera, shows: nose and eyes just around the head, ears either side
+        func pixel(_ offset: SIMD3<Float>) -> (u: Float, v: Float) {
+            let p = centre + offset
+            return (camera.cxn + camera.fxn * p.x / -p.z, camera.cyn - camera.fyn * p.y / -p.z)
+        }
+        let points: [(Int, SIMD3<Float>)] = [
+            (Int(L2K_SRC_NOSE), SIMD3(0, -0.02, 0.085)), (Int(L2K_SRC_EYE_LEFT), SIMD3(0.032, 0.03, 0.075)),
+            (Int(L2K_SRC_EAR_LEFT), SIMD3(0.075, 0, -0.01)), (Int(L2K_SRC_EAR_RIGHT), SIMD3(-0.075, 0, -0.01)),
+        ]
+        let face = points.map { source, offset in
+            let p = pixel(offset)
+            return DepthLiftJoint(source: source, u: p.u, v: p.v, radius: 0)
+        }
+        let placed = VisionHybridDetector.placeFace(face, head: head, camera: camera)
+        XCTAssertEqual(placed.map(\.source), points.map(\.0))
+        for (joint, (source, offset)) in zip(placed, points) {
+            let p = VisionKinematics.point(u: joint.u, v: joint.v, depth: joint.depth, camera: camera)
+            let isEar = source == Int(L2K_SRC_EAR_LEFT) || source == Int(L2K_SRC_EAR_RIGHT)
+            if isEar {
+                XCTAssertEqual(joint.depth, head.depth, accuracy: 0.02) // beside the head
+            } else {
+                XCTAssertEqual(simd_distance(p, centre), VisionHybridDetector.faceDistance[source]!, accuracy: 1e-4)
+                XCTAssertLessThan(joint.depth, head.depth - 0.05) // in front of the head
+                XCTAssertEqual(simd_distance(p, centre + offset), 0, accuracy: 0.01) // where it really was
+            }
+        }
     }
 }

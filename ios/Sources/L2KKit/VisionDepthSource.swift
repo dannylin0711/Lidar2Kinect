@@ -36,8 +36,14 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
     private var seenRate = 0.0, processedRate = 0.0
     private var lastError: String?
 
-    /// Frames are processed at most this often (a Kinect delivers 30 per second).
+    /// Frames are processed at most this often (a Kinect delivers 30 per second; ARKit's camera runs at 60). Set on
+    /// the source's queue (`requestFrameRate`).
     public var processingRate: Double = 30
+
+    /// ARKit delivers 60 camera frames a second; Vision on each of them is what limits the rate.
+    public var maxFrameRate: Double { 60 }
+
+    public func requestFrameRate(_ rate: Double) { processingRate = min(max(rate, 1), 60) }
     /// Take the person mask from Vision even where ARKit offers one together with the depth map.
     public var forceVisionMask = false
 
@@ -125,7 +131,7 @@ public final class VisionDepthSource: NSObject, L2KSource, ARSessionDelegate {
             for (person, id) in chosen {
                 var body = l2k_src_body()
                 body.tracking_id = id
-                let n = Self.lift(person.joints, depth: depth, mask: mask, camera: camera, into: &body)
+                let n = Self.lift(person.joints + person.face, depth: depth, mask: mask, camera: camera, into: &body)
                 lifted.append(n)
                 if n > 0 { bodies.append(body) }
             }

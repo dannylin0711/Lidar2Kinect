@@ -156,6 +156,16 @@ static void test_control_packets(void) {
     CHECK(c2.streams == c.streams && c2.skeleton_flags == 2 && c2.consumer_kind == L2K_CONSUMER_FAKE_KINECT);
     CHECK(c2.depth_mode == L2K_DEPTH_MODE_FULL && c2.color_quality == 60);
     CHECK(strcmp(c2.name, c.name) == 0);
+    CHECK(c2.rate == 0 && buf[43] == 0); /* the byte that was reserved: 0 = the default rate, as every older receiver sends */
+    /* a receiver asking for 60 frames a second: only byte 43 changes */
+    {
+        uint8_t again[256];
+        c.rate = 60;
+        CHECK(l2k_encode_config(again, sizeof again, 0x01020304u, 0xFFFFFFFFu, &c) == 76);
+        CHECK(again[43] == 60 && memcmp(again, buf, 43) == 0 && memcmp(again + 44, buf + 44, 76 - 44) == 0);
+        CHECK(l2k_decode_config(again, 76, &c2) == L2K_OK && c2.rate == 60);
+        c.rate = 0;
+    }
 
     n = l2k_encode_bye(buf, sizeof buf, 5, 6);
     CHECK(n == 16);
@@ -191,6 +201,86 @@ static void test_skeleton_packet(void) {
     CHECK(l2k_decode_skeleton(buf, n, &g) == L2K_OK && memcmp(&f, &g, sizeof f) == 0);
     for (i = 0; i < 6; i++) f.skeletons[i] = f.skeletons[1];
     CHECK(l2k_encode_skeleton(buf, sizeof buf, 1, 1, &f) == 0);
+}
+
+/* A body frame made of exactly representable numbers: the skeleton frame's header, one tracked and one
+ * position-only body. */
+static void fixed_body_frame(l2k_body_frame *f) {
+    l2k_skeleton_frame k;
+    int j;
+    l2k_body *a, *b;
+    fixed_frame(&k);
+    memset(f, 0, sizeof *f);
+    f->timestamp_us = k.timestamp_us;
+    f->frame_number = k.frame_number;
+    f->flags = k.flags;
+    f->floor_plane = k.floor_plane;
+    f->up = k.up;
+    f->source_kind = L2K_SOURCE_VISION_3D;
+    a = &f->bodies[2];
+    a->state = L2K_SKELETON_TRACKED;
+    a->quality = L2K_QUALITY_CLIPPED_LEFT;
+    a->tracking_id = 5;
+    a->position.x = 0.5f;
+    a->position.y = -0.25f;
+    a->position.z = 2.25f;
+    for (j = 0; j < L2K_BODY_JOINT_COUNT; j++) {
+        a->joints[j].x = (float)(j - 15) / 64.0f;
+        a->joints[j].y = (float)(j * 3 - 40) / 32.0f;
+        a->joints[j].z = 2.0f + (float)j / 256.0f;
+        a->joint_state[j] = (uint8_t)((j + 1) % 3);
+    }
+    b = &f->bodies[0];
+    b->state = L2K_SKELETON_POSITION_ONLY;
+    b->tracking_id = 9;
+    b->position.x = -1.0f;
+    b->position.y = 0.125f;
+    b->position.z = 3.5f;
+}
+
+static void test_body_packet(void) {
+    static uint8_t buf[L2K_MAX_DATAGRAM];
+    l2k_body_frame f, g;
+    l2k_skeleton_frame k;
+    size_t n;
+    int i;
+
+    fixed_body_frame(&f);
+    n = l2k_encode_body(buf, sizeof buf, 0x55667788u, 43, &f);
+    CHECK(n == 16 + 48 + 20 + (20 + 360 + 30 + 2));
+    golden("body.bin", buf, n);
+    CHECK(buf[5] == L2K_PKT_BODY);
+    CHECK(l2k_decode_body(buf, n, &g) == L2K_OK);
+    CHECK(memcmp(&f, &g, sizeof f) == 0);
+    for (i = 16; i < (int)n; i += 7) CHECK(l2k_decode_body(buf, (size_t)i, &g) != L2K_OK);
+    /* the record layout: slot 0 position only first (slot order), then slot 2 with its 30 joints */
+    CHECK(buf[60] == 2 && buf[61] == L2K_SOURCE_VISION_3D && buf[64] == 0 && buf[65] == L2K_SKELETON_POSITION_ONLY);
+    CHECK(buf[84] == 2 && buf[85] == L2K_SKELETON_TRACKED && buf[84 + 20 + 360] == 1 && buf[84 + 20 + 360 + 29] == 0);
+    /* neither the skeleton decoder nor the body decoder takes the other's packets */
+    CHECK(l2k_decode_skeleton(buf, n, &k) == L2K_ERR_TYPE);
+    fixed_frame(&k);
+    n = l2k_encode_skeleton(buf, sizeof buf, 1, 1, &k);
+    CHECK(l2k_decode_body(buf, n, &g) == L2K_ERR_TYPE);
+
+    /* two tracked bodies and four position-only ones fit one datagram; three tracked do not */
+    fixed_body_frame(&f);
+    for (i = 0; i < L2K_SKELETON_SLOTS; i++) f.bodies[i] = f.bodies[0];
+    f.bodies[1] = f.bodies[4] = f.bodies[2];
+    fixed_body_frame(&g);
+    f.bodies[1] = f.bodies[4] = g.bodies[2];
+    f.bodies[2] = g.bodies[0];
+    n = l2k_encode_body(buf, sizeof buf, 1, 1, &f);
+    CHECK(n == 64 + 2 * 412 + 4 * 20 && n <= L2K_MAX_DATAGRAM);
+    CHECK(l2k_decode_body(buf, n, &g) == L2K_OK && memcmp(&f, &g, sizeof f) == 0);
+    fixed_body_frame(&g);
+    f.bodies[3] = g.bodies[2];
+    CHECK(l2k_encode_body(buf, sizeof buf, 1, 1, &f) == 0);
+
+    /* a bad joint state is refused */
+    fixed_body_frame(&f);
+    n = l2k_encode_body(buf, sizeof buf, 1, 1, &f);
+    buf[84 + 20 + 360 + 3] = 3;
+    CHECK(l2k_decode_body(buf, n, &g) == L2K_ERR_FORMAT);
 }
 
 static void test_depth_codec(void) {
@@ -950,6 +1040,196 @@ static void test_cabinet_scene(void) {
     CHECK(n > 1500);
 }
 
+static void test_games(void) {
+    l2k_map_params a, b;
+    l2k_mapper m;
+    l2k_src_body body, moved;
+    l2k_skeleton_frame f;
+    l2k_vec3 up = {0, 1, 0};
+    uint64_t t = 1000000;
+    int i, frame;
+
+    CHECK(l2k_game_of_consumer(L2K_CONSUMER_VP4U) == L2K_GAME_DANCEAROUND);
+    CHECK(l2k_game_of_consumer(L2K_CONSUMER_UNKNOWN) == L2K_GAME_DANCE_EVOLUTION);
+    CHECK(l2k_game_of_consumer(L2K_CONSUMER_FAKE_KINECT) == L2K_GAME_DANCE_EVOLUTION);
+    CHECK(l2k_game_of_consumer(L2K_CONSUMER_SPICE_HOOK) == L2K_GAME_DANCE_EVOLUTION);
+    CHECK(l2k_game_of_consumer(L2K_CONSUMER_GAME_PORT) == L2K_GAME_DANCE_EVOLUTION);
+
+    /* Dance Evolution's values are the defaults; setting a game leaves every other field alone */
+    l2k_map_params_default(&a);
+    b = a;
+    l2k_map_params_set_game(&b, L2K_GAME_DANCE_EVOLUTION);
+    CHECK(memcmp(&a, &b, sizeof a) == 0);
+    l2k_map_params_set_game(&b, L2K_GAME_DANCEAROUND);
+    CHECK(nearly(b.area_near, 1.90f, 0) && nearly(b.area_far, 2.70f, 0) && nearly(b.area_half_width, 0.80f, 0));
+    CHECK(nearly(b.norm_distance, 2.30f, 0) && nearly(b.norm_reach, 0.40f, 0));
+    CHECK(b.hand_extension == a.hand_extension && b.hold_seconds == a.hold_seconds && b.norm_follow_seconds == a.norm_follow_seconds);
+    l2k_map_params_set_game(&b, L2K_GAME_DANCE_EVOLUTION);
+    CHECK(memcmp(&a, &b, sizeof a) == 0);
+
+    /* DanceAround's fit: a player 3.0 m away and 1.1 m to the side (inside Dance Evolution's area, outside
+     * DanceAround's) is slid to 2.70 m and 0.80 m */
+    l2k_synth_body(0.0, 0, 1, &body);
+    moved = body;
+    for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) moved.p[i].z -= 0.5f, moved.p[i].x -= 1.1f;
+    l2k_map_params_default(&a);
+    a.fit_play_area = 1;
+    l2k_mapper_init(&m, &a);
+    l2k_mapper_map(&m, &moved, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(f.skeletons[0].position.z > 2.9f && f.skeletons[0].position.x > 1.0f); /* Dance Evolution: inside, untouched */
+    l2k_map_params_set_game(&a, L2K_GAME_DANCEAROUND);
+    l2k_mapper_init(&m, &a);
+    l2k_mapper_map(&m, &moved, 1, up, 0, 0, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(nearly(f.skeletons[0].position.z, 2.70f, 1e-5f) && nearly(f.skeletons[0].position.x, 0.80f, 1e-5f));
+
+    /* DanceAround's standing point: 2.3 m, centred */
+    l2k_map_params_default(&a);
+    a.normalize = 1;
+    l2k_map_params_set_game(&a, L2K_GAME_DANCEAROUND);
+    l2k_mapper_init(&m, &a);
+    for (frame = 0; frame < 3; frame++, t += 33333) l2k_mapper_map(&m, &moved, 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    CHECK(nearly(f.skeletons[0].position.z, 2.30f, 1e-4f) && nearly(f.skeletons[0].position.x, 0.0f, 1e-4f));
+}
+
+/* Distance between two points. */
+static float dist(l2k_vec3 a, l2k_vec3 b) {
+    float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+static void test_body_mapping(void) {
+    l2k_mapper m, plain;
+    l2k_map_params prm;
+    l2k_src_body body, bare;
+    l2k_skeleton_frame f, g;
+    l2k_body_frame bf, bg;
+    l2k_vec3 up = {0, 1, 0};
+    l2k_vec3 up_tilted = {0.0f, 0.8660254f, 0.5f};
+    const l2k_body *b;
+    const l2k_skeleton *k;
+    uint64_t t = 1000000;
+    int i, j;
+    static const int FACE_SRC[5] = {L2K_SRC_NOSE, L2K_SRC_EYE_LEFT, L2K_SRC_EYE_RIGHT, L2K_SRC_EAR_LEFT, L2K_SRC_EAR_RIGHT};
+    static const int FACE_BODY[5] = {L2K_BODY_NOSE, L2K_BODY_EYE_LEFT, L2K_BODY_EYE_RIGHT, L2K_BODY_EAR_LEFT, L2K_BODY_EAR_RIGHT};
+
+    /* the face and hand points change nothing in the Kinect v1 skeleton */
+    l2k_synth_body(0.7, 0, 1, &body);
+    bare = body;
+    for (i = L2K_SRC_SKELETON_COUNT; i < L2K_SRC_JOINT_COUNT; i++) bare.conf[i] = 0, bare.p[i].x = 99.0f;
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_init(&plain, NULL);
+    l2k_mapper_map(&m, &body, 1, up_tilted, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    l2k_mapper_map(&plain, &bare, 1, up_tilted, 0, t, L2K_SOURCE_SYNTHETIC, &g);
+    CHECK(memcmp(&f, &g, sizeof f) == 0);
+
+    /* the body frame: the skeleton's joints, the shoulder centre as spine shoulder, the source's face and hands */
+    l2k_mapper_body_frame(&m, &f, &bf);
+    b = &bf.bodies[0];
+    k = &f.skeletons[0];
+    CHECK(bf.frame_number == f.frame_number && bf.timestamp_us == f.timestamp_us && bf.flags == f.flags && bf.source_kind == f.source_kind);
+    CHECK(memcmp(&bf.up, &f.up, sizeof bf.up) == 0 && memcmp(&bf.floor_plane, &f.floor_plane, sizeof bf.floor_plane) == 0);
+    CHECK(b->state == L2K_SKELETON_TRACKED && b->tracking_id == k->tracking_id && b->quality == k->quality);
+    for (j = 0; j < L2K_JOINT_COUNT; j++) {
+        int to = j == L2K_JOINT_SHOULDER_CENTER ? L2K_BODY_SPINE_SHOULDER : j;
+        CHECK(memcmp(&b->joints[to], &k->joints[j], sizeof b->joints[to]) == 0 && b->joint_state[to] == k->joint_state[j]);
+    }
+    for (i = 0; i < 5; i++) {
+        l2k_vec3 want = l2k_camera_to_kinect(body.p[FACE_SRC[i]], 0);
+        CHECK(dist(b->joints[FACE_BODY[i]], want) < 1e-6f && b->joint_state[FACE_BODY[i]] == L2K_JOINT_TRACKED);
+    }
+    CHECK(dist(b->joints[L2K_BODY_HAND_TIP_LEFT], l2k_camera_to_kinect(body.p[L2K_SRC_HAND_TIP_LEFT], 0)) < 1e-6f);
+    CHECK(dist(b->joints[L2K_BODY_THUMB_RIGHT], l2k_camera_to_kinect(body.p[L2K_SRC_THUMB_RIGHT], 0)) < 1e-6f);
+    CHECK(b->joint_state[L2K_BODY_NECK] == L2K_JOINT_INFERRED); /* no source has it: always placed */
+    for (j = 0; j < L2K_BODY_JOINT_COUNT; j++) CHECK(b->joint_state[j] != L2K_JOINT_NOT_TRACKED);
+
+    /* without them: placed from the skeleton, inferred; the formulas windows/vp4u used before */
+    l2k_mapper_body_frame(&plain, &g, &bg);
+    b = &bg.bodies[0];
+    k = &g.skeletons[0];
+    {
+        l2k_vec3 sc = k->joints[L2K_JOINT_SHOULDER_CENTER], head = k->joints[L2K_JOINT_HEAD];
+        l2k_vec3 w = k->joints[L2K_JOINT_WRIST_LEFT], h = k->joints[L2K_JOINT_HAND_LEFT];
+        l2k_vec3 neck = {sc.x + 0.35f * (head.x - sc.x), sc.y + 0.35f * (head.y - sc.y), sc.z + 0.35f * (head.z - sc.z)};
+        l2k_vec3 tip = {h.x + 1.2f * (h.x - w.x), h.y + 1.2f * (h.y - w.y), h.z + 1.2f * (h.z - w.z)};
+        CHECK(dist(b->joints[L2K_BODY_NECK], neck) < 1e-5f);
+        CHECK(dist(b->joints[L2K_BODY_HAND_TIP_LEFT], tip) < 1e-5f);
+        CHECK(nearly(dist(b->joints[L2K_BODY_NOSE], head), sqrtf(0.085f * 0.085f + 0.02f * 0.02f), 1e-5f));
+        CHECK(nearly(dist(b->joints[L2K_BODY_EAR_LEFT], b->joints[L2K_BODY_EAR_RIGHT]), 0.15f, 1e-5f));
+        /* the player faces the sensor: the nose is nearer to it than the head; the left ear on the player's left (-x) */
+        CHECK(b->joints[L2K_BODY_NOSE].z < head.z - 0.05f);
+        CHECK(b->joints[L2K_BODY_EAR_LEFT].x < head.x - 0.05f && b->joints[L2K_BODY_EAR_RIGHT].x > head.x + 0.05f);
+    }
+    for (j = L2K_JOINT_COUNT; j < L2K_BODY_JOINT_COUNT; j++) CHECK(j == L2K_BODY_SPINE_SHOULDER || b->joint_state[j] == L2K_JOINT_INFERRED);
+    /* a receiver given only SKELETON derives the same */
+    l2k_body_frame_from_skeleton(&g, &bf);
+    CHECK(memcmp(&bf, &bg, sizeof bf) == 0);
+    /* a frame that is not the mapper's last: derived, even though the mapper holds measured points */
+    l2k_mapper_body_frame(&m, &g, &bf);
+    g.frame_number = 7777;
+    l2k_mapper_body_frame(&m, &g, &bf);
+    CHECK(bf.bodies[0].joint_state[L2K_BODY_NOSE] == L2K_JOINT_INFERRED);
+
+    /* the extra joints move with the skeleton: play-area fit (a player 1.2 m away is slid to 1.9 m) */
+    l2k_map_params_default(&prm);
+    prm.fit_play_area = 1;
+    for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) body.p[i].z += 1.3f;
+    l2k_mapper_init(&m, &prm);
+    l2k_mapper_map(&m, &body, 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    l2k_mapper_body_frame(&m, &f, &bf);
+    b = &bf.bodies[0];
+    CHECK(nearly(f.skeletons[0].position.z, 1.90f, 1e-5f));
+    for (i = 0; i < 5; i++) {
+        l2k_vec3 src = l2k_camera_to_kinect(body.p[FACE_SRC[i]], 0), head = l2k_camera_to_kinect(body.p[L2K_SRC_HEAD], 0);
+        l2k_vec3 got = b->joints[FACE_BODY[i]], sent_head = b->joints[L2K_BODY_HEAD];
+        CHECK(nearly(got.x - sent_head.x, src.x - head.x, 1e-5f) && nearly(got.z - sent_head.z, src.z - head.z, 1e-5f));
+    }
+
+    /* ... normalising (a sensor looking 30 degrees down is levelled; the face keeps its place on the head) */
+    {
+        l2k_src_body tilted;
+        l2k_vec3 up30 = l2k_synth_up(-30.0f);
+        l2k_synth_body_at(0.7, 0, 1, 2.0f, -30.0f, &tilted);
+        l2k_map_params_default(&prm);
+        prm.normalize = 1;
+        l2k_mapper_init(&m, &prm);
+        l2k_mapper_map(&m, &tilted, 1, up30, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+        l2k_mapper_body_frame(&m, &f, &bf);
+        b = &bf.bodies[0];
+        CHECK(nearly(bf.up.y, 1.0f, 0) && nearly(b->position.z, 2.5f, 1e-4f));
+        for (i = 0; i < 5; i++) {
+            float want = dist(tilted.p[FACE_SRC[i]], tilted.p[L2K_SRC_HEAD]);
+            CHECK(nearly(dist(b->joints[FACE_BODY[i]], b->joints[L2K_BODY_HEAD]), want, 1e-5f));
+        }
+        /* level: the eyes are above the nose by the figure's own 5 cm */
+        CHECK(nearly(b->joints[L2K_BODY_EYE_LEFT].y - b->joints[L2K_BODY_NOSE].y, 0.05f, 1e-4f));
+    }
+
+    /* ... and the hold: the body lost for a frame keeps its face, inferred */
+    l2k_mapper_init(&m, NULL);
+    l2k_mapper_map(&m, &body, 1, up, 0, t, L2K_SOURCE_SYNTHETIC, &f);
+    l2k_mapper_body_frame(&m, &f, &bg);
+    l2k_mapper_map(&m, NULL, 0, up, 0, t + 33333, L2K_SOURCE_SYNTHETIC, &f);
+    l2k_mapper_body_frame(&m, &f, &bf);
+    CHECK(bf.bodies[0].state == L2K_SKELETON_TRACKED);
+    CHECK(dist(bf.bodies[0].joints[L2K_BODY_NOSE], bg.bodies[0].joints[L2K_BODY_NOSE]) < 1e-6f);
+    for (j = 0; j < L2K_BODY_JOINT_COUNT; j++) CHECK(bf.bodies[0].joint_state[j] == L2K_JOINT_INFERRED);
+
+    /* the fake sender's scene, two players: both bodies fit one BODY datagram */
+    {
+        static uint8_t pkt[L2K_MAX_DATAGRAM];
+        l2k_src_body two[2];
+        l2k_vec3 cab = l2k_synth_up(L2K_SYNTH_CABINET_TILT);
+        size_t n;
+        l2k_mapper_init(&m, NULL);
+        for (i = 0; i < 2; i++) l2k_synth_body_at(1.5, i, 2, L2K_SYNTH_CABINET_HEIGHT, L2K_SYNTH_CABINET_TILT, &two[i]);
+        l2k_mapper_map(&m, two, 2, cab, l2k_quadrant_from_up(cab.x, cab.y), t, L2K_SOURCE_SYNTHETIC, &f);
+        l2k_mapper_body_frame(&m, &f, &bf);
+        n = l2k_encode_body(pkt, sizeof pkt, 1, 1, &bf);
+        CHECK(n == 64 + 2 * 412);
+        CHECK(l2k_decode_body(pkt, n, &bg) == L2K_OK && memcmp(&bf, &bg, sizeof bf) == 0);
+    }
+}
+
 int main(int argc, char **argv) {
     int i;
     for (i = 1; i < argc; i++) {
@@ -958,6 +1238,7 @@ int main(int argc, char **argv) {
     }
     test_control_packets();
     test_skeleton_packet();
+    test_body_packet();
     test_depth_codec();
     test_chunks();
     test_mapping();
@@ -968,6 +1249,8 @@ int main(int argc, char **argv) {
     test_depth_images();
     test_smoothing();
     test_cabinet_scene();
+    test_games();
+    test_body_mapping();
     if (g_write) printf("golden packets written to %s\n", g_dir);
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

@@ -116,6 +116,69 @@ typedef struct l2k_skeleton_frame {
     l2k_skeleton skeletons[L2K_SKELETON_SLOTS];
 } l2k_skeleton_frame;
 
+/* The 30-joint body (L2K_STREAM_BODY, docs/02 section 4b, docs/03 "The 30-joint body"): Kinect v2's 25
+ * joints in its JointType order, then five face points - the joint set of DanceAround's vp4u interface
+ * (windows/docs/vp4u-interface.md section 3). Same space, units and left / right as the Kinect v1 skeleton.
+ * Joints 0..19 are Kinect v1's in the same order, except joint 2: v2's NECK lies between the shoulders and the
+ * head, and v1's shoulder centre is v2's SPINE_SHOULDER (20). */
+#define L2K_BODY_JOINT_COUNT 30
+
+enum {
+    L2K_BODY_SPINE_BASE = 0,     /* Kinect v1 hip centre */
+    L2K_BODY_SPINE_MID = 1,      /* Kinect v1 spine */
+    L2K_BODY_NECK = 2,
+    L2K_BODY_HEAD = 3,
+    L2K_BODY_SHOULDER_LEFT = 4,
+    L2K_BODY_ELBOW_LEFT = 5,
+    L2K_BODY_WRIST_LEFT = 6,
+    L2K_BODY_HAND_LEFT = 7,
+    L2K_BODY_SHOULDER_RIGHT = 8,
+    L2K_BODY_ELBOW_RIGHT = 9,
+    L2K_BODY_WRIST_RIGHT = 10,
+    L2K_BODY_HAND_RIGHT = 11,
+    L2K_BODY_HIP_LEFT = 12,
+    L2K_BODY_KNEE_LEFT = 13,
+    L2K_BODY_ANKLE_LEFT = 14,
+    L2K_BODY_FOOT_LEFT = 15,
+    L2K_BODY_HIP_RIGHT = 16,
+    L2K_BODY_KNEE_RIGHT = 17,
+    L2K_BODY_ANKLE_RIGHT = 18,
+    L2K_BODY_FOOT_RIGHT = 19,
+    L2K_BODY_SPINE_SHOULDER = 20, /* Kinect v1 shoulder centre */
+    L2K_BODY_HAND_TIP_LEFT = 21,
+    L2K_BODY_THUMB_LEFT = 22,
+    L2K_BODY_HAND_TIP_RIGHT = 23,
+    L2K_BODY_THUMB_RIGHT = 24,
+    L2K_BODY_NOSE = 25,
+    L2K_BODY_EYE_LEFT = 26,
+    L2K_BODY_EYE_RIGHT = 27,
+    L2K_BODY_EAR_LEFT = 28,
+    L2K_BODY_EAR_RIGHT = 29
+};
+
+/* One body slot of the 30-joint stream; the same slot, state, quality, tracking id and position as the
+ * skeleton slot of the same frame. */
+typedef struct l2k_body {
+    uint8_t state;        /* L2K_SKELETON_* */
+    uint8_t reserved;
+    uint16_t quality;     /* L2K_QUALITY_* bits */
+    uint32_t tracking_id;
+    l2k_vec3 position;
+    l2k_vec3 joints[L2K_BODY_JOINT_COUNT];
+    uint8_t joint_state[L2K_BODY_JOINT_COUNT]; /* L2K_JOINT_* */
+} l2k_body;
+
+typedef struct l2k_body_frame {
+    uint64_t timestamp_us;
+    uint32_t frame_number; /* the skeleton frame's number: both streams count the same frames */
+    uint32_t flags;        /* L2K_FRAME_* */
+    l2k_vec4 floor_plane;
+    l2k_vec3 up;
+    uint8_t source_kind;
+    uint8_t reserved[3];
+    l2k_body bodies[L2K_SKELETON_SLOTS];
+} l2k_body_frame;
+
 /* Virtual Kinect image sizes (what Dance Evolution opens; see docs/01). */
 #define L2K_DEPTH_WIDTH 320
 #define L2K_DEPTH_HEIGHT 240

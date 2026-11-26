@@ -28,8 +28,9 @@ extern "C" {
 
 /* The body of player `player` (0 or 1) at time t seconds. A 1.7 m figure about 2.5 m from the
  * camera, facing it, swaying and swinging its arms; player 0 stands left of the image centre when
- * `players` is 2, in the centre when it is 1. All joints are reported tracked, hands and toes
- * included. Seen by a level camera L2K_SYNTH_CAMERA_HEIGHT above the floor; world up is
+ * `players` is 2, in the centre when it is 1. All joints are reported tracked, hands, toes, hand
+ * tips, thumbs and the face included; the head turns from side to side (+-20 degrees), which moves
+ * only the face points. Seen by a level camera L2K_SYNTH_CAMERA_HEIGHT above the floor; world up is
  * L2K_SYNTH_UP_*. */
 void l2k_synth_body(double t, int player, int players, l2k_src_body *out);
 

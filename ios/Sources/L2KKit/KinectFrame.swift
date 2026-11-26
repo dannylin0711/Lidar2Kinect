@@ -32,10 +32,69 @@ public enum L2K {
     public static let streamSkeleton = UInt32(L2K_STREAM_SKELETON)
     public static let streamDepth = UInt32(L2K_STREAM_DEPTH)
     public static let streamColor = UInt32(L2K_STREAM_COLOR)
+    /// 30-joint bodies (Kinect v2's joints and five face points; DanceAround's receiver asks for them).
+    public static let streamBody = UInt32(L2K_STREAM_BODY)
+    /// Skeleton frames per second when the receiver asks for no rate (a Kinect's rate).
+    public static let defaultRate = Double(L2K_DEFAULT_RATE)
 
     /// Microseconds on the monotonic clock the frame timestamps use (the system uptime clock).
     public static func nowMicroseconds() -> UInt64 {
         UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000)
+    }
+}
+
+/// The game a receiver feeds, from its CONFIG consumer kind (`l2k_game_of_consumer`). Each has its own play area and
+/// standing point (docs/03 "Play area").
+public enum L2KGame: Int32, CaseIterable {
+    case danceEvolution = 0 // L2K_GAME_DANCE_EVOLUTION
+    case danceAround = 1    // L2K_GAME_DANCEAROUND
+
+    public init(consumerKind: UInt8) {
+        self = L2KGame(rawValue: l2k_game_of_consumer(consumerKind)) ?? .danceEvolution
+    }
+
+    public var name: String { self == .danceAround ? "DanceAround" : "Dance Evolution" }
+
+    /// The mapper's play area and standing point for this game (the other fields are left alone).
+    func apply(to params: inout l2k_map_params) { l2k_map_params_set_game(&params, rawValue) }
+
+    private var params: l2k_map_params {
+        var p = l2k_map_params()
+        l2k_map_params_default(&p)
+        apply(to: &p)
+        return p
+    }
+
+    /// Where the game takes a player (metres from the sensor, level; sideways either side of its axis): the area the
+    /// game reads, not the 10 cm smaller one the fit keeps to.
+    public var playAreaNear: Float { params.area_near - 0.10 }
+    public var playAreaFar: Float { params.area_far + 0.10 }
+    public var playAreaHalfWidth: Float { params.area_half_width + 0.10 }
+    /// Where "Best position" puts a single player (metres from the sensor).
+    public var standingDistance: Float { params.norm_distance }
+    /// The game can take two players at once (DanceAround takes the nearest body only).
+    public var takesTwoPlayers: Bool { self == .danceEvolution }
+}
+
+public extension l2k_body_frame {
+    /// The six body slots.
+    var slots: [l2k_body] {
+        withUnsafeBytes(of: bodies) { Array($0.bindMemory(to: l2k_body.self)) }
+    }
+
+    /// Slots that hold a fully tracked body, with their slot index.
+    var trackedBodies: [(slot: Int, body: l2k_body)] {
+        slots.enumerated().compactMap { $0.element.state == UInt8(L2K_SKELETON_TRACKED) ? (slot: $0.offset, body: $0.element) : nil }
+    }
+}
+
+public extension l2k_body {
+    var jointPositions: [l2k_vec3] {
+        withUnsafeBytes(of: joints) { Array($0.bindMemory(to: l2k_vec3.self)) }
+    }
+
+    var jointStates: [UInt8] {
+        withUnsafeBytes(of: joint_state) { Array($0) }
     }
 }
 

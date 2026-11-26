@@ -55,12 +55,20 @@ public final class ARKitBodySource: NSObject, L2KSource, ARSessionDelegate {
         (Int(L2K_SRC_TOE_RIGHT), "right_toes_joint"),
     ]
     private static let headJointName = "head_joint"
+    /// Face joints of ARKit's skeleton, for the 30-joint body only; not every OS version need have them, so a missing
+    /// one is not reported. (The hand's joints are left out for the reason above: they follow the forearm.)
+    private static let faceJointNames: [(Int, String)] = [
+        (Int(L2K_SRC_NOSE), "nose_joint"), (Int(L2K_SRC_EYE_LEFT), "left_eye_joint"), (Int(L2K_SRC_EYE_RIGHT), "right_eye_joint"),
+    ]
+    /// ARKit's body tracking runs at 60 frames a second.
+    public var maxFrameRate: Double { 60 }
     /// Distance from ARKit's head joint (where the head pivots on the neck) to the centre of the head, metres.
     /// An estimate to calibrate on device (docs/03 "Calibration").
     private static let headCentreOffset: Float = 0.09
 
     /// (source joint, ARKit joint index) for the names this OS version knows; `missing` lists the others.
     private let jointMap: [(Int, Int)]
+    private let faceMap: [(Int, Int)]
     private let headIndex: Int?
     private let neckIndex: Int?
     public let missingJointNames: [String]
@@ -77,6 +85,7 @@ public final class ARKitBodySource: NSObject, L2KSource, ARSessionDelegate {
             if let i = index(name) { map.append((source, i)) } else { missing.append(name) }
         }
         jointMap = map
+        faceMap = Self.faceJointNames.compactMap { source, name in index(name).map { (source, $0) } }
         headIndex = index(Self.headJointName)
         neckIndex = index("neck_1_joint")
         if headIndex == nil { missing.append(Self.headJointName) }
@@ -169,7 +178,7 @@ public final class ARKitBodySource: NSObject, L2KSource, ARSessionDelegate {
             let p = cameraFromBody * transforms[index].columns.3
             return SIMD3(p.x, p.y, p.z)
         }
-        for (source, index) in jointMap where index < transforms.count {
+        for (source, index) in jointMap + faceMap where index < transforms.count {
             body.set(source, cameraPosition(index), confidence: skeleton.isJointTracked(index) ? 2 : 1)
         }
         if let headIndex, headIndex < transforms.count {

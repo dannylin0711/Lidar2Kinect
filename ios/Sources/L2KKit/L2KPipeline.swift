@@ -33,6 +33,9 @@ public struct L2KFrame {
     /// The frame was (also) made for the local consumer: it carries the local-only images that were asked for.
     /// Frames in between, made only to be sent, do not - a preview must not show them.
     public var forLocal = false
+    /// The same frame as 30-joint bodies (Kinect v2's joints and five face points, `l2k_mapper_body_frame`): what a
+    /// receiver asking for `L2K.streamBody` gets. Same slots, ids and positions as `skeleton`.
+    public var body = l2k_body_frame()
 }
 
 /// The raw depth map resampled to the virtual Kinect image (320x240).
@@ -78,8 +81,19 @@ public final class L2KPipeline {
         set { settingsLock.lock(); wantedNormalizePlayers = max(1, min(2, newValue)); settingsLock.unlock() }
     }
 
-    /// The play area Dance Evolution accepts a player in (read from the game, docs/01 section 8), in metres.
+    /// The play area Dance Evolution accepts a player in (read from the game, docs/01 section 8), in metres. The other
+    /// game's: `L2KGame.playAreaNear` etc.
     public static let playAreaNear: Float = 1.80, playAreaFar: Float = 3.20, playAreaHalfWidth: Float = 1.25
+
+    private var wantedGame = L2KGame.danceEvolution
+
+    /// The game the skeleton is sent to: its play area is the one the fit keeps to, its standing point the one the
+    /// normalising uses (`l2k_map_params_set_game`); DanceAround takes one player, so it is told about one. The session
+    /// sets it from the receiver's consumer kind. Safe to set from any thread.
+    public var game: L2KGame {
+        get { settingsLock.lock(); defer { settingsLock.unlock() }; return wantedGame }
+        set { settingsLock.lock(); wantedGame = newValue; settingsLock.unlock() }
+    }
 
     /// A player who is lost and comes back gets the slot and tracking id they had (on by default). Off: a returning
     /// player is a new one after the half-second hold, as on a Kinect. Safe to set from any thread.
@@ -171,11 +185,13 @@ public final class L2KPipeline {
     /// consumer that judges movement gets the skeleton before any image work is done (`L2KSession.onSkeleton`).
     public func skeletonFrame(_ source: L2KSourceFrame, kind: UInt8) -> L2KFrame {
         let q = updateQuadrant(up: source.upCamera)
+        let game = game
+        game.apply(to: &mapper.params)
         mapper.params.upper_body = upperBodyMode ? 1 : 0
         mapper.params.keep_identity = keepIdentity ? 1 : 0
         mapper.params.fit_play_area = fitPlayArea ? 1 : 0
         mapper.params.normalize = normalize ? 1 : 0
-        mapper.params.norm_players = UInt8(normalizePlayers)
+        mapper.params.norm_players = UInt8(game.takesTwoPlayers ? normalizePlayers : 1)
         var skeleton = l2k_skeleton_frame()
         let up = l2k_vec3(x: source.upCamera.x, y: source.upCamera.y, z: source.upCamera.z)
         source.bodies.withUnsafeBufferPointer { bodies in
@@ -183,6 +199,7 @@ public final class L2KPipeline {
                            UInt64(source.timestamp * 1_000_000), kind, &skeleton)
         }
         var frame = L2KFrame(skeleton: skeleton, depth: nil, color: nil, quadrant: q)
+        l2k_mapper_body_frame(&mapper, &skeleton, &frame.body)
         frame.realDistance = Self.realDistance(of: source.bodies.first, quadrant: q, up: skeleton.up)
         var picture = skeleton
         picture.skeletons = mapper.picture

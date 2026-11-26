@@ -1,6 +1,7 @@
 /* Lidar2Kinect - body source -> Kinect skeleton frame, and joint smoothing. */
 #include "l2k/l2k_map.h"
 #include "l2k/l2k_depth.h"
+#include "l2k/l2k_protocol.h"
 
 #include <math.h>
 #include <string.h>
@@ -37,17 +38,40 @@ void l2k_map_params_default(l2k_map_params *p) {
     p->keep_identity = 1;
     p->identity_seconds = 0.0f;
     p->fit_play_area = 0;
-    p->area_near = 1.90f;      /* the game accepts 1.80 .. 3.20 m: stay 10 cm inside */
-    p->area_far = 3.10f;
-    p->area_half_width = 1.15f; /* the game accepts +-1.25 m */
-    p->area_hip_min = 0.40f;    /* the game accepts a hip 0 .. 2 m above its floor */
-    p->area_hip_max = 1.60f;
     p->normalize = 0;
     p->norm_players = 1;
-    p->norm_distance = 2.5f;       /* the game's world origin: the middle of its play area */
-    p->norm_spacing = 0.61f;       /* its two-player standing points */
     p->norm_follow_seconds = 2.0f;
-    p->norm_reach = 0.5f;          /* the play area reaches 0.7 m before and behind, 1.25 m either side */
+    l2k_map_params_set_game(p, L2K_GAME_DANCE_EVOLUTION); /* the play area and the standing point */
+}
+
+int l2k_game_of_consumer(uint8_t consumer_kind) {
+    return consumer_kind == L2K_CONSUMER_VP4U ? L2K_GAME_DANCEAROUND : L2K_GAME_DANCE_EVOLUTION;
+}
+
+void l2k_map_params_set_game(l2k_map_params *p, int game) {
+    if (game == L2K_GAME_DANCEAROUND) {
+        /* SpineBase inside x 0.55 +- 0.9, z 2.30 +- 0.505 of the game's frame (udnappsetting.json's play area with its
+         * margin, windows/docs/vp4u-interface.md section 5), and windows/vp4u puts the phone at x 0.55, z 0: so
+         * 1.795 .. 2.805 m from the phone and 0.9 m either side. Stay 10 cm inside, as for Dance Evolution. */
+        p->area_near = 1.90f;
+        p->area_far = 2.70f;
+        p->area_half_width = 0.80f;
+        p->area_hip_min = 0.40f; /* the game takes a SpineBase 0.06 .. 2.26 m above the floor (camera 1.16 m +- 1.1) */
+        p->area_hip_max = 1.60f;
+        p->norm_distance = 2.30f; /* the play area's centre */
+        p->norm_spacing = 0.61f;  /* unused: the game takes one player */
+        p->norm_reach = 0.40f;    /* the play area reaches 0.505 m before and behind */
+    } else {
+        /* Dance Evolution (docs/01 section 8) */
+        p->area_near = 1.90f;      /* the game accepts 1.80 .. 3.20 m: stay 10 cm inside */
+        p->area_far = 3.10f;
+        p->area_half_width = 1.15f; /* the game accepts +-1.25 m */
+        p->area_hip_min = 0.40f;    /* the game accepts a hip 0 .. 2 m above its floor */
+        p->area_hip_max = 1.60f;
+        p->norm_distance = 2.5f;    /* the game's world origin: the middle of its play area */
+        p->norm_spacing = 0.61f;    /* its two-player standing points */
+        p->norm_reach = 0.5f;       /* the play area reaches 0.7 m before and behind, 1.25 m either side */
+    }
 }
 
 void l2k_mapper_init(l2k_mapper *m, const l2k_map_params *params) {
@@ -103,7 +127,62 @@ typedef struct {
     uint8_t valid[L2K_JOINT_COUNT];
 } joint_memory;
 
-static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int quadrant, l2k_vec3 up, l2k_skeleton *s, joint_memory *mem) {
+/* The 30-joint body's extra joints (L2K_BODY_EXTRA_COUNT, in the order of l2k_mapper.extra), the body joint each is,
+ * and the source joint that gives it (-1: none, always placed from the skeleton). */
+static const uint8_t EXTRA_BODY[L2K_BODY_EXTRA_COUNT] = {
+    L2K_BODY_NECK, L2K_BODY_HAND_TIP_LEFT, L2K_BODY_THUMB_LEFT, L2K_BODY_HAND_TIP_RIGHT, L2K_BODY_THUMB_RIGHT,
+    L2K_BODY_NOSE, L2K_BODY_EYE_LEFT, L2K_BODY_EYE_RIGHT, L2K_BODY_EAR_LEFT, L2K_BODY_EAR_RIGHT};
+static const int8_t EXTRA_SRC[L2K_BODY_EXTRA_COUNT] = {
+    -1, L2K_SRC_HAND_TIP_LEFT, L2K_SRC_THUMB_LEFT, L2K_SRC_HAND_TIP_RIGHT, L2K_SRC_THUMB_RIGHT,
+    L2K_SRC_NOSE, L2K_SRC_EYE_LEFT, L2K_SRC_EYE_RIGHT, L2K_SRC_EAR_LEFT, L2K_SRC_EAR_RIGHT};
+
+/* Placement of the extra joints from a tracked skeleton: first estimates (until 2026-11-26 the Windows side's own,
+ * windows/vp4u/vp4u_map.cpp), not measured against VisionPose or a Kinect v2. */
+#define NECK_FRACTION 0.35f      /* NECK = shoulder centre + f * (head - shoulder centre) */
+#define HAND_TIP_EXTENSION 1.2f  /* HAND_TIP = hand + e * (hand - wrist) */
+#define THUMB_FRACTION 0.8f      /* THUMB = wrist + f * (hand - wrist) + THUMB_FORWARD along the body's forward */
+#define THUMB_FORWARD 0.03f
+#define NOSE_FORWARD 0.085f
+#define NOSE_DOWN 0.02f
+#define EYE_FORWARD 0.075f
+#define EYE_UP 0.03f
+#define EYE_SIDE 0.032f
+#define EAR_SIDE 0.075f
+#define EAR_BACK 0.01f
+
+static uint8_t derived_state(uint8_t a, uint8_t b) { return (a && b) ? L2K_JOINT_INFERRED : L2K_JOINT_NOT_TRACKED; }
+
+/* The extra joints placed from the skeleton's own joints; `up` is the frame's up vector. */
+static void derive_extras(const l2k_skeleton *s, l2k_vec3 up, l2k_vec3 *p, uint8_t *st) {
+    l2k_vec3 x_default = {1, 0, 0}, fwd_default = {0, 0, -1};
+    /* the player's right, level, and where they face (towards the sensor for a player facing it: -z) */
+    l2k_vec3 side = v_sub(s->joints[L2K_JOINT_SHOULDER_RIGHT], s->joints[L2K_JOINT_SHOULDER_LEFT]);
+    l2k_vec3 fwd, head = s->joints[L2K_JOINT_HEAD], sc = s->joints[L2K_JOINT_SHOULDER_CENTER];
+    uint8_t face = s->joint_state[L2K_JOINT_HEAD] ? L2K_JOINT_INFERRED : L2K_JOINT_NOT_TRACKED;
+    int i;
+    side = v_unit(v_sub(side, v_scale(up, v_dot(side, up))), x_default);
+    fwd = v_unit(v_cross(up, side), fwd_default);
+
+    p[0] = v_add(sc, v_scale(v_sub(head, sc), NECK_FRACTION));
+    st[0] = derived_state(s->joint_state[L2K_JOINT_SHOULDER_CENTER], s->joint_state[L2K_JOINT_HEAD]);
+    for (i = 0; i < 2; i++) {
+        int wrist = i ? L2K_JOINT_WRIST_RIGHT : L2K_JOINT_WRIST_LEFT, hand = i ? L2K_JOINT_HAND_RIGHT : L2K_JOINT_HAND_LEFT;
+        l2k_vec3 w = s->joints[wrist], h = s->joints[hand], wh = v_sub(h, w);
+        uint8_t ds = derived_state(s->joint_state[wrist], s->joint_state[hand]);
+        p[1 + 2 * i] = v_add(h, v_scale(wh, HAND_TIP_EXTENSION));
+        p[2 + 2 * i] = v_add(v_add(w, v_scale(wh, THUMB_FRACTION)), v_scale(fwd, THUMB_FORWARD));
+        st[1 + 2 * i] = st[2 + 2 * i] = ds;
+    }
+    p[5] = v_add(head, v_sub(v_scale(fwd, NOSE_FORWARD), v_scale(up, NOSE_DOWN)));
+    p[6] = v_add(head, v_add(v_add(v_scale(fwd, EYE_FORWARD), v_scale(up, EYE_UP)), v_scale(side, -EYE_SIDE)));
+    p[7] = v_add(head, v_add(v_add(v_scale(fwd, EYE_FORWARD), v_scale(up, EYE_UP)), v_scale(side, EYE_SIDE)));
+    p[8] = v_add(head, v_add(v_scale(side, -EAR_SIDE), v_scale(fwd, -EAR_BACK)));
+    p[9] = v_add(head, v_add(v_scale(side, EAR_SIDE), v_scale(fwd, -EAR_BACK)));
+    for (i = 5; i < L2K_BODY_EXTRA_COUNT; i++) st[i] = face;
+}
+
+static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int quadrant, l2k_vec3 up, l2k_skeleton *s, joint_memory *mem,
+                        l2k_vec3 *extra_p, uint8_t *extra_state) {
     l2k_vec3 k[L2K_SRC_JOINT_COUNT];
     uint8_t conf[L2K_SRC_JOINT_COUNT];
     l2k_vec3 pelvis, neck, torso, sum = {0, 0, 0}, shoulder_line = {1, 0, 0};
@@ -115,7 +194,7 @@ static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int qu
     for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) {
         conf[i] = b->conf[i] > 2 ? 2 : b->conf[i];
         k[i] = l2k_camera_to_kinect(b->p[i], quadrant);
-        if (conf[i]) {
+        if (conf[i] && i < L2K_SRC_SKELETON_COUNT) {
             sum = v_add(sum, k[i]);
             known++;
         }
@@ -246,6 +325,15 @@ static uint8_t map_body(const l2k_map_params *prm, const l2k_src_body *b, int qu
     }
 
     s->position = s->joints[L2K_JOINT_HIP_CENTER];
+
+    /* the 30-joint body's other joints: the source's where it gives them, else placed from the skeleton */
+    derive_extras(s, up, extra_p, extra_state);
+    for (i = 0; i < L2K_BODY_EXTRA_COUNT; i++) {
+        if (EXTRA_SRC[i] >= 0 && conf[EXTRA_SRC[i]]) {
+            extra_p[i] = k[EXTRA_SRC[i]];
+            extra_state[i] = conf[EXTRA_SRC[i]];
+        }
+    }
     return L2K_SKELETON_TRACKED;
 }
 
@@ -274,7 +362,7 @@ static int rough_position(const l2k_src_body *b, int quadrant, l2k_vec3 *out) {
             return 1;
         }
     }
-    for (i = 0; i < L2K_SRC_JOINT_COUNT; i++) {
+    for (i = 0; i < L2K_SRC_SKELETON_COUNT; i++) {
         if (b->conf[i]) {
             sum = v_add(sum, l2k_camera_to_kinect(b->p[i], quadrant));
             known++;
@@ -290,10 +378,13 @@ static uint32_t new_out_id(l2k_mapper *m) {
     return m->next_out_id;
 }
 
-static void shift_skeleton(l2k_skeleton *sk, l2k_vec3 shift) {
+/* Move slot s's skeleton and its extra joints. */
+static void shift_slot(l2k_mapper *m, l2k_skeleton_frame *out, int s, l2k_vec3 shift) {
+    l2k_skeleton *sk = &out->skeletons[s];
     int j;
     sk->position = v_add(sk->position, shift);
     for (j = 0; j < L2K_JOINT_COUNT; j++) sk->joints[j] = v_add(sk->joints[j], shift);
+    for (j = 0; j < L2K_BODY_EXTRA_COUNT; j++) m->extra[s].p[j] = v_add(m->extra[s].p[j], shift);
 }
 
 /* Turn p about the sensor by the rotation that takes the unit vector `up` to the y axis. */
@@ -326,6 +417,7 @@ static void normalize_frame(l2k_mapper *m, l2k_skeleton_frame *out, l2k_vec3 up,
         if (sk->state == L2K_SKELETON_NOT_TRACKED) continue;
         sk->position = level_point(sk->position, up);
         for (j = 0; j < L2K_JOINT_COUNT; j++) sk->joints[j] = level_point(sk->joints[j], up);
+        for (j = 0; j < L2K_BODY_EXTRA_COUNT; j++) m->extra[s].p[j] = level_point(m->extra[s].p[j], up);
     }
     out->up.x = 0.0f; out->up.y = 1.0f; out->up.z = 0.0f;
     if (out->flags & L2K_FRAME_FLOOR_VALID) {
@@ -346,6 +438,7 @@ static void normalize_frame(l2k_mapper *m, l2k_skeleton_frame *out, l2k_vec3 up,
     for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
         if (s == chosen[0] || s == chosen[1]) continue;
         if (out->skeletons[s].state != L2K_SKELETON_NOT_TRACKED) memset(&out->skeletons[s], 0, sizeof out->skeletons[s]);
+        memset(&m->extra[s], 0, sizeof m->extra[s]);
         m->anchor[s].valid = 0;
         m->anchor[s].side = 0;
     }
@@ -397,7 +490,7 @@ static void normalize_frame(l2k_mapper *m, l2k_skeleton_frame *out, l2k_vec3 up,
         shift.x = (wanted == 2 ? (float)m->anchor[s].side * p->norm_spacing : 0.0f) - m->anchor[s].x;
         shift.y = 0.0f;
         shift.z = p->norm_distance - m->anchor[s].z;
-        shift_skeleton(&out->skeletons[s], shift);
+        shift_slot(m, out, s, shift);
     }
 }
 
@@ -414,6 +507,7 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
     uint64_t identity_us = (uint64_t)((m->params.identity_seconds > 0.0f ? m->params.identity_seconds : 0.0f) * 1e6f);
 
     memset(out, 0, sizeof *out);
+    memset(m->extra, 0, sizeof m->extra);
     out->timestamp_us = timestamp_us;
     out->frame_number = ++m->frame_number;
     out->source_kind = source_kind;
@@ -492,7 +586,8 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
         if (slot_of[i] < 0) continue;
         s = slot_of[i];
         sk = &out->skeletons[s];
-        sk->state = map_body(&m->params, &bodies[i], quadrant, up, sk, (joint_memory *)(void *)&m->memory[s]);
+        sk->state = map_body(&m->params, &bodies[i], quadrant, up, sk, (joint_memory *)(void *)&m->memory[s],
+                             m->extra[s].p, m->extra[s].state);
         if (sk->state == L2K_SKELETON_NOT_TRACKED) {
             m->slot_id[s] = 0;
             continue;
@@ -500,6 +595,7 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
         sk->tracking_id = m->out_id[s];
         if (sk->state != L2K_SKELETON_TRACKED) continue;
         m->last[s] = *sk;
+        m->last_extra[s] = m->extra[s];
         m->has_last[s] = 1;
         m->last_seen_us[s] = timestamp_us;
         if (floor_under(&m->params, sk, up, &h)) {
@@ -515,8 +611,12 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
         absent = timestamp_us > m->last_seen_us[s] ? timestamp_us - m->last_seen_us[s] : 0;
         if (absent > hold_us) continue;
         out->skeletons[s] = m->last[s];
+        m->extra[s] = m->last_extra[s];
         for (j = 0; j < L2K_JOINT_COUNT; j++) {
             if (out->skeletons[s].joint_state[j] > L2K_JOINT_INFERRED) out->skeletons[s].joint_state[j] = L2K_JOINT_INFERRED;
+        }
+        for (j = 0; j < L2K_BODY_EXTRA_COUNT; j++) {
+            if (m->extra[s].state[j] > L2K_JOINT_INFERRED) m->extra[s].state[j] = L2K_JOINT_INFERRED;
         }
     }
 
@@ -572,12 +672,69 @@ void l2k_mapper_map(l2k_mapper *m, const l2k_src_body *bodies, int body_count, l
             d2 = d < m->params.area_near ? m->params.area_near : d > m->params.area_far ? m->params.area_far : d;
             x2 = x < -m->params.area_half_width ? -m->params.area_half_width : x > m->params.area_half_width ? m->params.area_half_width : x;
             if (d2 == d && x2 == x) continue;
-            shift_skeleton(sk, v_add(v_scale(forward, d2 - d), v_scale(side, x2 - x)));
+            shift_slot(m, out, s, v_add(v_scale(forward, d2 - d), v_scale(side, x2 - x)));
         }
     }
     if (!m->params.normalize) {
         for (s = 0; s < L2K_SKELETON_SLOTS; s++) m->anchor[s].valid = 0;
         m->norm_last_us = 0;
+    }
+}
+
+/* ---- the 30-joint body ---- */
+
+/* One slot; `extra` (may be NULL) holds the mapper's extra joints for it, used where their state is nonzero. */
+static void body_of(const l2k_skeleton *sk, l2k_vec3 up, const l2k_vec3 *extra_p, const uint8_t *extra_state, l2k_body *out) {
+    l2k_vec3 p[L2K_BODY_EXTRA_COUNT];
+    uint8_t st[L2K_BODY_EXTRA_COUNT];
+    int j;
+    memset(out, 0, sizeof *out);
+    out->state = sk->state;
+    out->quality = sk->quality;
+    out->tracking_id = sk->tracking_id;
+    out->position = sk->position;
+    if (sk->state != L2K_SKELETON_TRACKED) return;
+    for (j = 0; j < L2K_JOINT_COUNT; j++) {
+        int to = j == L2K_JOINT_SHOULDER_CENTER ? L2K_BODY_SPINE_SHOULDER : j;
+        out->joints[to] = sk->joints[j];
+        out->joint_state[to] = sk->joint_state[j];
+    }
+    derive_extras(sk, up, p, st);
+    for (j = 0; j < L2K_BODY_EXTRA_COUNT; j++) {
+        if (extra_p && extra_state && extra_state[j]) {
+            p[j] = extra_p[j];
+            st[j] = extra_state[j];
+        }
+        out->joints[EXTRA_BODY[j]] = p[j];
+        out->joint_state[EXTRA_BODY[j]] = st[j];
+    }
+}
+
+static void body_frame_head(const l2k_skeleton_frame *f, l2k_body_frame *out) {
+    memset(out, 0, sizeof *out);
+    out->timestamp_us = f->timestamp_us;
+    out->frame_number = f->frame_number;
+    out->flags = f->flags;
+    out->floor_plane = f->floor_plane;
+    out->up = f->up;
+    out->source_kind = f->source_kind;
+}
+
+void l2k_body_from_skeleton(const l2k_skeleton *skeleton, l2k_vec3 up, l2k_body *out) {
+    body_of(skeleton, up, NULL, NULL, out);
+}
+
+void l2k_body_frame_from_skeleton(const l2k_skeleton_frame *frame, l2k_body_frame *out) {
+    int s;
+    body_frame_head(frame, out);
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) body_of(&frame->skeletons[s], frame->up, NULL, NULL, &out->bodies[s]);
+}
+
+void l2k_mapper_body_frame(const l2k_mapper *m, const l2k_skeleton_frame *frame, l2k_body_frame *out) {
+    int s, own = frame->frame_number == m->frame_number;
+    body_frame_head(frame, out);
+    for (s = 0; s < L2K_SKELETON_SLOTS; s++) {
+        body_of(&frame->skeletons[s], frame->up, own ? m->extra[s].p : NULL, own ? m->extra[s].state : NULL, &out->bodies[s]);
     }
 }
 

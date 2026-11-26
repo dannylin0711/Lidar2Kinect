@@ -19,6 +19,9 @@ public final class L2KSender {
         public var receiverName = ""
         public var streams: UInt32 = 0
         public var depthMode: UInt8 = 0
+        /// The receiver's CONFIG consumer kind (L2K_CONSUMER_*) and the frame rate it asked for (0 = the default).
+        public var consumerKind: UInt8 = 0
+        public var rate: UInt8 = 0
         public var roundTripMs: Double?
         public var framesSent = 0
         public var bytesSent = 0
@@ -55,19 +58,32 @@ public final class L2KSender {
     private var packet = [UInt8](repeating: 0, count: L2K.maxDatagram)
     private var depthEncoded = [UInt8](repeating: 0, count: L2K.depthWidth * L2K.depthHeight * 3)
 
+    /// What the receiver currently wants (its last CONFIG, limited to what this sender announced).
+    public struct Wanted: Equatable {
+        /// Streams asked for; 0 while not streaming.
+        public var streams: UInt32 = 0
+        public var depthMode: UInt8 = 0
+        /// JPEG quality 1...100, 0 = the sender's default.
+        public var quality: UInt8 = 0
+        /// L2K_CONSUMER_*: what kind of receiver it is (which game it feeds).
+        public var consumerKind: UInt8 = 0
+        /// Skeleton / body frames per second, 0 = the default (`L2K.defaultRate`).
+        public var rate: UInt8 = 0
+
+        public init() {}
+    }
+
     // What the receiver currently wants; read from the capture queue.
     private let lock = NSLock()
-    private var wantedStreams: UInt32 = 0
-    private var wantedDepthMode: UInt8 = 0
-    private var wantedQuality: UInt8 = 0
+    private var wantedNow = Wanted()
 
     public init() {}
 
-    /// Streams the receiver asked for (0 while not streaming), its depth mode, and its JPEG quality (0 = default).
-    public var wanted: (streams: UInt32, depthMode: UInt8, quality: UInt8) {
+    /// What the receiver asked for in its last CONFIG (nothing while not streaming).
+    public var wanted: Wanted {
         lock.lock()
         defer { lock.unlock() }
-        return (wantedStreams, wantedDepthMode, wantedQuality)
+        return wantedNow
     }
 
     public func setIdentity(_ identity: Identity) {
@@ -127,25 +143,40 @@ public final class L2KSender {
         }
     }
 
-    /// Send one frame: the skeleton, and the images the receiver asked for when they are given.
-    /// `depth` is 320x240 packed pixels, `jpeg` a 640x480 JPEG.
-    public func send(skeleton: l2k_skeleton_frame, depth: [UInt16]?, jpeg: Data?) {
-        transmit(skeleton: skeleton, withSkeleton: true, depth: depth, jpeg: jpeg)
+    /// Send one frame: the skeleton (and its 30-joint bodies), and the images the receiver asked for when they are
+    /// given. `depth` is 320x240 packed pixels, `jpeg` a 640x480 JPEG.
+    public func send(skeleton: l2k_skeleton_frame, body: l2k_body_frame? = nil, depth: [UInt16]?, jpeg: Data?) {
+        transmit(skeleton: skeleton, body: body, withSkeleton: true, depth: depth, jpeg: jpeg)
     }
 
-    /// Send a frame's skeleton alone, at once; its images follow with `sendImages` when they are made. The packets and
-    /// their order are those of `send` - the skeleton only leaves earlier.
-    public func send(skeleton: l2k_skeleton_frame) {
-        transmit(skeleton: skeleton, withSkeleton: true, depth: nil, jpeg: nil)
+    /// Send a frame's skeleton alone, at once - with the same frame's 30-joint bodies when the receiver takes them;
+    /// its images follow with `sendImages` when they are made. The packets and their order are those of `send` - the
+    /// skeleton only leaves earlier.
+    public func send(skeleton: l2k_skeleton_frame, body: l2k_body_frame? = nil) {
+        transmit(skeleton: skeleton, body: body, withSkeleton: true, depth: nil, jpeg: nil)
     }
 
     /// Send the images of a frame whose skeleton went out with `send(skeleton:)`.
     public func sendImages(of skeleton: l2k_skeleton_frame, depth: [UInt16]?, jpeg: Data?) {
         guard depth != nil || jpeg != nil else { return }
-        transmit(skeleton: skeleton, withSkeleton: false, depth: depth, jpeg: jpeg)
+        transmit(skeleton: skeleton, body: nil, withSkeleton: false, depth: depth, jpeg: jpeg)
     }
 
-    private func transmit(skeleton: l2k_skeleton_frame, withSkeleton: Bool, depth: [UInt16]?, jpeg: Data?) {
+    /// A BODY packet holds two tracked bodies at most (docs/02 section 4b): the others are sent as position only.
+    static func fittingTwoTracked(_ frame: l2k_body_frame) -> l2k_body_frame {
+        var frame = frame
+        withUnsafeMutableBytes(of: &frame.bodies) { raw in
+            let bodies = raw.bindMemory(to: l2k_body.self)
+            var tracked = 0
+            for i in bodies.indices where bodies[i].state == UInt8(L2K_SKELETON_TRACKED) {
+                tracked += 1
+                if tracked > 2 { bodies[i].state = UInt8(L2K_SKELETON_POSITION_ONLY) }
+            }
+        }
+        return frame
+    }
+
+    private func transmit(skeleton: l2k_skeleton_frame, body: l2k_body_frame?, withSkeleton: Bool, depth: [UInt16]?, jpeg: Data?) {
         queue.async {
             guard let connection = self.connection, self.status.state == .streaming else { return }
             var skeleton = skeleton
@@ -154,6 +185,19 @@ public final class L2KSender {
             connection.batch {
                 if withSkeleton, streams & L2K.streamSkeleton != 0 {
                     let n = l2k_encode_skeleton(&self.packet, L2K.maxDatagram, self.session, self.nextSeq(), &skeleton)
+                    if n > 0 {
+                        connection.send(content: Data(self.packet[0..<n]), completion: .idempotent)
+                        bytes += n
+                    }
+                }
+                if withSkeleton, streams & L2K.streamBody != 0, let body {
+                    var frame = body
+                    let seq = self.nextSeq()
+                    var n = l2k_encode_body(&self.packet, L2K.maxDatagram, self.session, seq, &frame)
+                    if n == 0 {
+                        frame = Self.fittingTwoTracked(body)
+                        n = l2k_encode_body(&self.packet, L2K.maxDatagram, self.session, seq, &frame)
+                    }
                     if n > 0 {
                         connection.send(content: Data(self.packet[0..<n]), completion: .idempotent)
                         bytes += n
@@ -228,7 +272,7 @@ public final class L2KSender {
             status.state = .waitingForReceiver
             status.streams = 0
             status.roundTripMs = nil
-            setWanted(streams: 0, depthMode: 0, quality: 0)
+            setWanted(Wanted())
         }
         var hello = l2k_hello()
         hello.sender_time_us = now
@@ -260,7 +304,7 @@ public final class L2KSender {
         if header.type == UInt8(L2K_PKT_BYE) {
             status.state = .waitingForReceiver
             status.streams = 0
-            setWanted(streams: 0, depthMode: 0, quality: 0)
+            setWanted(Wanted())
             publish()
             return
         }
@@ -269,22 +313,29 @@ public final class L2KSender {
         lastConfigTime = now
         let streams = config.streams & identity.capabilities
         let changed = status.state != .streaming || status.streams != streams || status.depthMode != config.depth_mode
+            || status.consumerKind != config.consumer_kind || status.rate != config.rate
         status.state = .streaming
         status.receiverName = l2kGetName(config.name)
         status.streams = streams
         status.depthMode = config.depth_mode
+        status.consumerKind = config.consumer_kind
+        status.rate = config.rate
         if config.echo_sender_time_us != 0, now >= config.echo_sender_time_us {
             status.roundTripMs = Double(now - config.echo_sender_time_us) / 1000
         }
-        setWanted(streams: status.streams, depthMode: config.depth_mode, quality: config.color_quality)
+        var wanted = Wanted()
+        wanted.streams = streams
+        wanted.depthMode = config.depth_mode
+        wanted.quality = config.color_quality
+        wanted.consumerKind = config.consumer_kind
+        wanted.rate = config.rate
+        setWanted(wanted)
         if changed { publish() }
     }
 
-    private func setWanted(streams: UInt32, depthMode: UInt8, quality: UInt8) {
+    private func setWanted(_ wanted: Wanted) {
         lock.lock()
-        wantedStreams = streams
-        wantedDepthMode = depthMode
-        wantedQuality = quality
+        wantedNow = wanted
         lock.unlock()
     }
 
@@ -293,7 +344,7 @@ public final class L2KSender {
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
-        setWanted(streams: 0, depthMode: 0, quality: 0)
+        setWanted(Wanted())
     }
 
     private func publish() {

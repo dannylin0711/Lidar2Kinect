@@ -2,10 +2,12 @@
  * l2k_fake_sender - a Lidar2Kinect sender without a camera. Streams the synthetic dancing figure
  * (skeleton, capsule-figure depth image, and optionally one JPEG repeated as the colour image), so
  * receivers can be developed and tested on a PC alone. It follows the same HELLO / CONFIG rules as
- * the iOS app.
+ * the iOS app, the 30-joint body stream included (the figure's face and hand points are its own).
  *
  *   l2k_fake_sender [-p port] [-n players] [-f fps] [-j colour.jpg] [-t seconds] [-H metres] [-a degrees] host
  *
+ *   -f  skeleton / body frames per second when the receiver asks for no rate (default 30); a receiver that
+ *       asks for one (CONFIG rate) gets that. Images: at most 30 a second, like the app.
  *   -H  sensor height above the floor (default L2K_SYNTH_CABINET_HEIGHT, 2 m: Dance Evolution's cabinet)
  *   -a  sensor tilt, negative = looking down (default L2K_SYNTH_CABINET_TILT, -24)
  */
@@ -53,9 +55,9 @@ int main(int argc, char **argv) {
     size_t jpeg_len = 0;
     l2k_mapper mapper;
     l2k_config cfg;
-    uint64_t start, next_frame, last_hello = 0, last_config = 0, last_report;
+    uint64_t start, next_frame, last_hello = 0, last_config = 0, last_report, last_images = 0;
     uint32_t frame = 0;
-    unsigned sent = 0;
+    unsigned sent = 0, rate_shown = 0;
     int have_config = 0;
 
     for (i = 1; i < argc; i++) {
@@ -112,7 +114,11 @@ int main(int argc, char **argv) {
         while ((n = (int)recvfrom(g_sock, (char *)pkt, sizeof pkt, 0, NULL, NULL)) > 0) {
             l2k_config c;
             if (l2k_decode_config(pkt, (size_t)n, &c) == L2K_OK) {
-                if (!have_config) printf("receiver \"%s\" wants streams 0x%x, round trip %.1f ms\n", c.name, (unsigned)c.streams, (double)(now - c.echo_sender_time_us) / 1000.0);
+                if (!have_config || c.rate != rate_shown) {
+                    printf("receiver \"%s\" (consumer kind %u) wants streams 0x%x at %u frames/s (0 = default), round trip %.1f ms\n", c.name,
+                           (unsigned)c.consumer_kind, (unsigned)c.streams, (unsigned)c.rate, (double)(now - c.echo_sender_time_us) / 1000.0);
+                    rate_shown = c.rate;
+                }
                 cfg = c;
                 have_config = 1;
                 last_config = now;
@@ -128,7 +134,7 @@ int main(int argc, char **argv) {
             l2k_hello h;
             memset(&h, 0, sizeof h);
             h.sender_time_us = now;
-            h.caps = L2K_STREAM_SKELETON | L2K_STREAM_DEPTH | (jpeg_len ? L2K_STREAM_COLOR : 0);
+            h.caps = L2K_STREAM_SKELETON | L2K_STREAM_BODY | L2K_STREAM_DEPTH | (jpeg_len ? L2K_STREAM_COLOR : 0);
             h.max_tracked = (uint8_t)players;
             h.source_kind = L2K_SOURCE_SYNTHETIC;
             strcpy(h.name, "l2k_fake_sender");
@@ -137,7 +143,8 @@ int main(int argc, char **argv) {
         }
 
         if (now >= next_frame) {
-            next_frame += 1000000ull / (uint64_t)fps;
+            int rate = have_config && cfg.rate ? cfg.rate : fps;
+            next_frame += 1000000ull / (uint64_t)rate;
             if (next_frame < now) next_frame = now;
             if (have_config) {
                 l2k_src_body bodies[2];
@@ -146,15 +153,22 @@ int main(int argc, char **argv) {
                 double t = (double)(now - start) / 1e6;
                 for (i = 0; i < players; i++) l2k_synth_body_at(t, i, players, height, tilt, &bodies[i]);
                 l2k_mapper_map(&mapper, bodies, players, up, l2k_quadrant_from_up(up.x, up.y), now, L2K_SOURCE_SYNTHETIC, &f);
+                int images = now - last_images >= 750000ull / L2K_DEFAULT_RATE;
                 frame = f.frame_number;
                 if (cfg.streams & L2K_STREAM_SKELETON) send_packet(pkt, l2k_encode_skeleton(pkt, sizeof pkt, g_session, ++g_seq, &f));
-                if (cfg.streams & L2K_STREAM_DEPTH) {
+                if (cfg.streams & L2K_STREAM_BODY) {
+                    l2k_body_frame b;
+                    l2k_mapper_body_frame(&mapper, &f, &b);
+                    send_packet(pkt, l2k_encode_body(pkt, sizeof pkt, g_session, ++g_seq, &b));
+                }
+                if (images) last_images = now;
+                if (images && (cfg.streams & L2K_STREAM_DEPTH)) {
                     size_t len;
                     l2k_depth_rasterize(&f, depth_px, L2K_DEPTH_WIDTH, L2K_DEPTH_HEIGHT, 0);
                     len = l2k_depth_d1_encode(depth_px, DEPTH_PIXELS, depth_enc, sizeof depth_enc);
                     send_image(L2K_PKT_DEPTH, L2K_DEPTH_D1, L2K_DEPTH_WIDTH, L2K_DEPTH_HEIGHT, depth_enc, len, now, frame);
                 }
-                if ((cfg.streams & L2K_STREAM_COLOR) && jpeg_len) {
+                if (images && (cfg.streams & L2K_STREAM_COLOR) && jpeg_len) {
                     send_image(L2K_PKT_COLOR, L2K_COLOR_JPEG, L2K_COLOR_WIDTH, L2K_COLOR_HEIGHT, jpeg, jpeg_len, now, frame);
                 }
                 sent++;

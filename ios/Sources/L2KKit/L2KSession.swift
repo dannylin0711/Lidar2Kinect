@@ -27,8 +27,9 @@ public final class L2KSession {
     /// The local consumer's `L2KFrame.colorPreview` shows the whole camera image (for a camera that sees more than the
     /// Kinect; replaces `localColorPreviewZoom`).
     public var localColorPreviewFitsCamera = false
-    /// Output rate in frames per second. A Kinect delivers 30.
-    public var outputRate: Double = 30
+    /// Output rate in frames per second when the receiver asks for none (CONFIG rate 0). A Kinect delivers 30. A
+    /// receiver that asks for a rate gets it (up to 120), as far as the source keeps up; images stay at 30 at most.
+    public var outputRate: Double = L2K.defaultRate
     /// Name announced to receivers.
     public var deviceName = "Lidar2Kinect"
     /// JPEG quality used when the receiver does not ask for one.
@@ -39,6 +40,8 @@ public final class L2KSession {
 
     private var lastOutput: TimeInterval = 0
     private var lastLocal: TimeInterval = 0
+    private var lastImages: TimeInterval = 0
+    private var requestedRate: Double = 0
     private let settingsLock = NSLock()
     private var wantedColorEnabled = true
 
@@ -57,7 +60,7 @@ public final class L2KSession {
 
     /// The streams a source can offer, given the colour setting.
     static func capabilities(providesImages: Bool, colorEnabled: Bool) -> UInt32 {
-        var capabilities = L2K.streamSkeleton | L2K.streamDepth
+        var capabilities = L2K.streamSkeleton | L2K.streamBody | L2K.streamDepth
         if providesImages && colorEnabled { capabilities |= L2K.streamColor }
         return capabilities
     }
@@ -74,6 +77,8 @@ public final class L2KSession {
         stop()
         self.source = source
         lastOutput = 0
+        lastImages = 0
+        requestedRate = 0
         announce(source)
         source.onFrame = { [weak self] frame in self?.handle(frame) }
         do {
@@ -91,10 +96,24 @@ public final class L2KSession {
         source = nil
     }
 
+    /// The skeleton rate for what the receiver wants: its CONFIG rate, else `outputRate`.
+    static func frameRate(asked: UInt8, otherwise: Double) -> Double {
+        asked > 0 ? min(Double(asked), 120) : otherwise
+    }
+
     private func handle(_ sourceFrame: L2KSourceFrame) {
         guard let source else { return }
-        // Thin a faster camera down to the output rate (60 fps capture -> every second frame).
-        let interval = 1.0 / outputRate
+        let wanted = sender.wanted
+        // The receiver's game decides the play area and the standing point. Kept while no receiver is there, so a
+        // short silence does not move the player.
+        if wanted.streams != 0 { pipeline.game = L2KGame(consumerKind: wanted.consumerKind) }
+        // Thin a faster camera down to the output rate (60 fps capture -> every second frame, unless 60 is asked for).
+        let rate = Self.frameRate(asked: wanted.streams != 0 ? wanted.rate : 0, otherwise: outputRate)
+        if rate != requestedRate {
+            requestedRate = rate
+            source.requestFrameRate(rate)
+        }
+        let interval = 1.0 / rate
         if lastOutput > 0, sourceFrame.timestamp - lastOutput < interval * 0.75 { return }
         lastOutput = sourceFrame.timestamp
 
@@ -103,16 +122,18 @@ public final class L2KSession {
             "quadrant": Int(l2k_quadrant_from_up(sourceFrame.upCamera.x, sourceFrame.upCamera.y)),
             "camera": [sourceFrame.camera.fxn, sourceFrame.camera.fyn, sourceFrame.camera.cxn, sourceFrame.camera.cyn],
         ])
-        let wanted = sender.wanted
-        let sendDepth = wanted.streams & L2K.streamDepth != 0
-        let sendColor = wanted.streams & L2K.streamColor != 0 && colorEnabled
+        // Images at the Kinect's rate at most, whatever the skeleton's rate.
+        let imagesDue = lastImages == 0 || sourceFrame.timestamp - lastImages >= (1 / L2K.defaultRate) * 0.75
+        if imagesDue { lastImages = sourceFrame.timestamp }
+        let sendDepth = imagesDue && wanted.streams & L2K.streamDepth != 0
+        let sendColor = imagesDue && wanted.streams & L2K.streamColor != 0 && colorEnabled
         // Images only the local consumer wants (a preview) are made at the local rate, not for every frame.
         let localDue = sourceFrame.timestamp - lastLocal >= (1 / localRate) * 0.9
         if localDue { lastLocal = sourceFrame.timestamp }
         // The skeleton first: it goes to the receiver and to the local consumer before any image is made.
         var frame = pipeline.skeletonFrame(sourceFrame, kind: source.kind)
         frame.forLocal = localDue
-        if wanted.streams != 0 { sender.send(skeleton: frame.skeleton) }
+        if wanted.streams != 0 { sender.send(skeleton: frame.skeleton, body: wanted.streams & L2K.streamBody != 0 ? frame.body : nil) }
         onSkeleton?(frame)
         pipeline.addImages(to: &frame, from: sourceFrame,
                            wantDepth: sendDepth || (localWantsDepth && localDue),
@@ -121,7 +142,7 @@ public final class L2KSession {
                            wantDepthPreview: localWantsDepthPreview && localDue,
                            colorPreviewZoom: (localWantsColor && localDue) ? localColorPreviewZoom : 1,
                            colorPreviewFit: localWantsColor && localDue && localColorPreviewFitsCamera)
-        if wanted.streams != 0 {
+        if wanted.streams != 0, sendDepth || sendColor {
             var jpeg: Data?
             if sendColor, let color = frame.color {
                 let quality = wanted.quality == 0 ? defaultJPEGQuality : Double(min(wanted.quality, 100)) / 100

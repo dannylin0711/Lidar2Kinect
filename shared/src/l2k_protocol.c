@@ -184,7 +184,7 @@ size_t l2k_encode_config(uint8_t *buf, size_t cap, uint32_t session, uint32_t se
     w_u8(&w, config->consumer_kind);
     w_u8(&w, config->depth_mode);
     w_u8(&w, config->color_quality);
-    w_u8(&w, 0);
+    w_u8(&w, config->rate);
     w_name(&w, config->name);
     return finish(&w, buf);
 }
@@ -200,7 +200,7 @@ int l2k_decode_config(const uint8_t *buf, size_t len, l2k_config *out) {
     out->consumer_kind = r_u8(&r);
     out->depth_mode = r_u8(&r);
     out->color_quality = r_u8(&r);
-    out->reserved = r_u8(&r);
+    out->rate = r_u8(&r);
     r_name(&r, out->name);
     return r.ok ? L2K_OK : L2K_ERR_SHORT;
 }
@@ -302,6 +302,106 @@ int l2k_decode_skeleton(const uint8_t *buf, size_t len, l2k_skeleton_frame *out)
             r_bytes(&r, s->joint_state, L2K_JOINT_COUNT);
             for (j = 0; j < L2K_JOINT_COUNT; j++) {
                 if (s->joint_state[j] > L2K_JOINT_TRACKED) return L2K_ERR_FORMAT;
+            }
+        }
+        if (!r.ok) return L2K_ERR_SHORT;
+    }
+    return L2K_OK;
+}
+
+/* ---- BODY (30 joints) ---- */
+
+size_t l2k_encode_body(uint8_t *buf, size_t cap, uint32_t session, uint32_t seq, const l2k_body_frame *f) {
+    wr w;
+    int i, j;
+    uint8_t count = 0;
+    for (i = 0; i < L2K_SKELETON_SLOTS; i++) {
+        if (f->bodies[i].state > L2K_SKELETON_TRACKED) return 0;
+        if (f->bodies[i].state != L2K_SKELETON_NOT_TRACKED) count++;
+    }
+    begin(&w, buf, cap, L2K_PKT_BODY, session, seq);
+    w_u64(&w, f->timestamp_us);
+    w_u32(&w, f->frame_number);
+    w_u32(&w, f->flags);
+    w_f32(&w, f->floor_plane.x);
+    w_f32(&w, f->floor_plane.y);
+    w_f32(&w, f->floor_plane.z);
+    w_f32(&w, f->floor_plane.w);
+    w_f32(&w, f->up.x);
+    w_f32(&w, f->up.y);
+    w_f32(&w, f->up.z);
+    w_u8(&w, count);
+    w_u8(&w, f->source_kind);
+    w_u16(&w, 0);
+    for (i = 0; i < L2K_SKELETON_SLOTS; i++) {
+        const l2k_body *b = &f->bodies[i];
+        if (b->state == L2K_SKELETON_NOT_TRACKED) continue;
+        w_u8(&w, (uint8_t)i);
+        w_u8(&w, b->state);
+        w_u16(&w, b->quality);
+        w_u32(&w, b->tracking_id);
+        w_f32(&w, b->position.x);
+        w_f32(&w, b->position.y);
+        w_f32(&w, b->position.z);
+        if (b->state == L2K_SKELETON_TRACKED) {
+            for (j = 0; j < L2K_BODY_JOINT_COUNT; j++) {
+                w_f32(&w, b->joints[j].x);
+                w_f32(&w, b->joints[j].y);
+                w_f32(&w, b->joints[j].z);
+            }
+            w_bytes(&w, b->joint_state, L2K_BODY_JOINT_COUNT);
+            w_u16(&w, 0); /* keeps the next record 4-byte aligned */
+        }
+    }
+    return finish(&w, buf);
+}
+
+int l2k_decode_body(const uint8_t *buf, size_t len, l2k_body_frame *out) {
+    rd r;
+    int i, j, count;
+    int e = open_payload(buf, len, L2K_PKT_BODY, L2K_PKT_BODY, &r);
+    if (e != L2K_OK) return e;
+    memset(out, 0, sizeof *out);
+    out->timestamp_us = r_u64(&r);
+    out->frame_number = r_u32(&r);
+    out->flags = r_u32(&r);
+    out->floor_plane.x = r_f32(&r);
+    out->floor_plane.y = r_f32(&r);
+    out->floor_plane.z = r_f32(&r);
+    out->floor_plane.w = r_f32(&r);
+    out->up.x = r_f32(&r);
+    out->up.y = r_f32(&r);
+    out->up.z = r_f32(&r);
+    count = r_u8(&r);
+    out->source_kind = r_u8(&r);
+    (void)r_u16(&r);
+    if (!r.ok) return L2K_ERR_SHORT;
+    if (count > L2K_SKELETON_SLOTS) return L2K_ERR_FORMAT;
+    for (i = 0; i < count; i++) {
+        uint8_t slot = r_u8(&r);
+        uint8_t state = r_u8(&r);
+        l2k_body *b;
+        if (!r.ok) return L2K_ERR_SHORT;
+        if (slot >= L2K_SKELETON_SLOTS) return L2K_ERR_FORMAT;
+        if (state != L2K_SKELETON_POSITION_ONLY && state != L2K_SKELETON_TRACKED) return L2K_ERR_FORMAT;
+        b = &out->bodies[slot];
+        if (b->state != L2K_SKELETON_NOT_TRACKED) return L2K_ERR_FORMAT; /* slot listed twice */
+        b->state = state;
+        b->quality = r_u16(&r);
+        b->tracking_id = r_u32(&r);
+        b->position.x = r_f32(&r);
+        b->position.y = r_f32(&r);
+        b->position.z = r_f32(&r);
+        if (state == L2K_SKELETON_TRACKED) {
+            for (j = 0; j < L2K_BODY_JOINT_COUNT; j++) {
+                b->joints[j].x = r_f32(&r);
+                b->joints[j].y = r_f32(&r);
+                b->joints[j].z = r_f32(&r);
+            }
+            r_bytes(&r, b->joint_state, L2K_BODY_JOINT_COUNT);
+            (void)r_u16(&r);
+            for (j = 0; j < L2K_BODY_JOINT_COUNT; j++) {
+                if (b->joint_state[j] > L2K_JOINT_TRACKED) return L2K_ERR_FORMAT;
             }
         }
         if (!r.ok) return L2K_ERR_SHORT;

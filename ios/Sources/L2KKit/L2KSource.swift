@@ -63,8 +63,15 @@ public protocol L2KSource: AnyObject {
     var onFrame: ((L2KSourceFrame) -> Void)? { get set }
     func start() throws
     func stop()
+    /// Frames per second the source can deliver at most as it runs now (a camera's capture rate).
+    var maxFrameRate: Double { get }
+    /// Deliver up to this many frames a second (30 by default; a receiver can ask for 60). A source that thins a faster
+    /// camera down keeps more of its frames. Called on the source's own queue, from inside `onFrame`.
+    func requestFrameRate(_ rate: Double)
 }
 
 public extension L2KSource {
     var diagnostics: [String] { [] }
+    var maxFrameRate: Double { L2K.defaultRate }
+    func requestFrameRate(_ rate: Double) {}
 }

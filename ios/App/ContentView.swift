@@ -89,30 +89,29 @@ struct ContentView: View {
                         : "The camera runs at 60 frames a second, so your movement reaches the game sooner. This camera shows less of the room that fast: step back if you no longer fit in the picture.")
                      : "The camera runs at 30 frames a second in the format that shows the most.")
                     .font(.footnote).foregroundStyle(.secondary)
+                if askedRate > 30, model.sourceFrameRate < Double(askedRate) {
+                    Text("The receiver asks for \(askedRate) frames a second; this camera runs at \(Int(model.sourceFrameRate.rounded())), so it gets \(Int(model.sourceFrameRate.rounded())). Turn on the faster camera for more.")
+                        .font(.footnote).foregroundStyle(.orange)
+                }
             }
             Toggle("Upper body only", isOn: $model.upperBodyOnly)
             if model.upperBodyOnly {
                 Text("For a camera that sees you from the waist up. Your arms and head are tracked; the legs are filled in standing still, so foot and step notes will miss.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            Toggle("Best position for Dance Evolution", isOn: $model.normalize)
-            if model.normalize {
+            Toggle("Best position for \(game.name)", isOn: $model.normalize)
+            if model.normalize, game.takesTwoPlayers {
                 Picker("Players in the game", selection: $model.normalizePlayers) {
                     Text("1 player").tag(1)
                     Text("2 players").tag(2)
                 }
                 .pickerStyle(.segmented)
             }
-            Text(model.normalize
-                 ? (model.normalizePlayers == 2
-                    ? "The game is told two players stand 0.61 m either side of the middle of its play area, 2.5 m from a level sensor, each on the side they really stand on. Steps and leans are sent as they are; where you stand in the room is not."
-                    : "The game is told you stand in the middle of its play area, 2.5 m from a level sensor, wherever you really are and however the device is tilted. Steps and leans are sent as they are; where you stand in the room is not. Other people in view are not sent.")
-                 : "Off: you are reported where you really stand, as seen from this device.")
-                .font(.footnote).foregroundStyle(.secondary)
+            Text(normalizeText).font(.footnote).foregroundStyle(.secondary)
             Toggle("Fit me into the game's play area", isOn: $model.fitPlayArea).disabled(model.normalize)
             Text(model.fitPlayArea
-                 ? "If you stand nearer than 1.8 m, farther than 3.2 m or more than 1.25 m to one side, the game is told you are just inside those limits. Your pose is not changed."
-                 : "You are reported where you really stand. The game ignores a player outside 1.8–3.2 m from the sensor or more than 1.25 m to one side.")
+                 ? "If you stand nearer than \(metres(game.playAreaNear)), farther than \(metres(game.playAreaFar)) or more than \(metres(game.playAreaHalfWidth)) to one side, the game is told you are just inside those limits. Your pose is not changed."
+                 : "You are reported where you really stand. \(game.name) ignores a player outside \(span(game)) from the sensor or more than \(metres(game.playAreaHalfWidth)) to one side.")
                 .font(.footnote).foregroundStyle(.secondary)
             Toggle("Keep the same player", isOn: $model.keepPlayer)
             Text(model.keepPlayer
@@ -122,8 +121,22 @@ struct ContentView: View {
             if let error = model.sourceError {
                 Text(error).font(.footnote).foregroundStyle(.red)
             }
-            LiveReadings(live: model.live, normalize: model.normalize, fitPlayArea: model.fitPlayArea)
+            LiveReadings(live: model.live, normalize: model.normalize, fitPlayArea: model.fitPlayArea, game: game)
         }
+    }
+
+    private var game: L2KGame { model.game }
+    /// Skeleton frames a second the receiver asks for (30 when it asks for none).
+    private var askedRate: Int { model.senderStatus.state == .streaming && model.senderStatus.rate > 0 ? Int(model.senderStatus.rate) : 30 }
+
+    private var normalizeText: String {
+        guard model.normalize else { return "Off: you are reported where you really stand, as seen from this device." }
+        let distance = metres(game.standingDistance)
+        if game.takesTwoPlayers, model.normalizePlayers == 2 {
+            return "The game is told two players stand 0.61 m either side of the middle of its play area, \(distance) from a level sensor, each on the side they really stand on. Steps and leans are sent as they are; where you stand in the room is not."
+        }
+        return "The game is told you stand in the middle of its play area, \(distance) from a level sensor, wherever you really are and however the device is tilted. Steps and leans are sent as they are; where you stand in the room is not. Other people in view are not sent."
+            + (game.takesTwoPlayers ? "" : " \(game.name) takes one player.")
     }
 
     // MARK: - receiver
@@ -160,10 +173,18 @@ struct ContentView: View {
             }
             if model.senderStatus.state == .streaming {
                 Row("Receiver", model.senderStatus.receiverName)
+                Row("Game", game.name)
                 Row("Sending", streamNames(model.senderStatus.streams))
+                if model.senderStatus.rate > 0 {
+                    Row("Frames a second asked for", "\(model.senderStatus.rate)")
+                }
                 if let rtt = model.senderStatus.roundTripMs {
                     Row("Round trip", String(format: "%.1f ms", rtt))
                 }
+            }
+            if game == .danceAround {
+                Text("For DanceAround: the device centred in front of where you dance, the camera towards you, in landscape, about 1 m up. Stand about 2.3 m away (1.8–2.8 m), within 0.9 m of the middle.")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
             if !model.receivers.isEmpty {
                 Divider()
@@ -195,11 +216,26 @@ struct ContentView: View {
     private func streamNames(_ streams: UInt32) -> String {
         var names: [String] = []
         if streams & L2K.streamSkeleton != 0 { names.append("skeleton") }
+        if streams & L2K.streamBody != 0 { names.append("30-joint bodies") }
         if streams & L2K.streamDepth != 0 { names.append("depth") }
         if streams & L2K.streamColor != 0 { names.append("colour") }
         return names.isEmpty ? "nothing" : names.joined(separator: ", ")
     }
 }
+
+/// "2.3", "1.25": centimetres at most, no trailing zeros.
+private func number(_ value: Float) -> String {
+    var text = String(format: "%.2f", value)
+    while text.hasSuffix("0") { text.removeLast() }
+    if text.hasSuffix(".") { text.removeLast() }
+    return text
+}
+
+/// "2.3 m"
+private func metres(_ value: Float) -> String { number(value) + " m" }
+
+/// "1.8–3.2 m"
+private func span(_ game: L2KGame) -> String { "\(number(game.playAreaNear))–\(number(game.playAreaFar)) m" }
 
 /// The camera choice. Equatable, and used with `.equatable()`: it is only rebuilt when the choice or the list changes,
 /// so its menu stays as it is while the rest of the page is redrawn.
@@ -243,6 +279,7 @@ private struct LiveReadings: View {
     @ObservedObject var live: LiveState
     let normalize: Bool
     let fitPlayArea: Bool
+    let game: L2KGame
 
     var body: some View {
         Text(live.sourceStatus).font(.footnote).foregroundStyle(.secondary)
@@ -259,10 +296,10 @@ private struct LiveReadings: View {
                 if normalize {
                     Text(String(format: "Reported to the game at %.2f m.", body.position.z))
                         .font(.footnote).foregroundStyle(.secondary)
-                } else if real < L2KPipeline.playAreaNear || real > L2KPipeline.playAreaFar {
+                } else if real < game.playAreaNear || real > game.playAreaFar {
                     Text(fitPlayArea
-                         ? String(format: "The game only takes a player 1.8–3.2 m away. You are reported to it at %.2f m.", body.position.z)
-                         : "The game only takes a player 1.8–3.2 m away: it will not pick you up here.")
+                         ? "\(game.name) only takes a player \(span(game)) away. You are reported to it at \(String(format: "%.2f m", body.position.z))."
+                         : "\(game.name) only takes a player \(span(game)) away: it will not pick you up here.")
                         .font(.footnote).foregroundStyle(fitPlayArea ? Color.secondary : Color.orange)
                 }
             }

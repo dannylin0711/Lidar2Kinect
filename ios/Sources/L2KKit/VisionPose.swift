@@ -37,6 +37,9 @@ struct VisionPerson {
     var joints: [DepthLiftJoint]
     var centre: SIMD2<Float> // buffer coordinates, normalised
     var size: Float          // neck-to-root distance in the buffer, normalised; 0 if unknown
+    /// Nose, eyes and ears where the picture shows them (L2K_SRC_NOSE ...): only for the 30-joint body, so kept apart
+    /// from the skeleton's joints.
+    var face: [DepthLiftJoint] = []
 }
 
 /// 2D body pose of everyone in a camera buffer.
@@ -66,6 +69,12 @@ final class VisionBodyDetector {
         (.rightAnkle, Int(L2K_SRC_ANKLE_RIGHT), 0.04),
     ]
     private static let headRadius: Float = 0.10
+    /// Face points -> source joints, with the distance from the surface a depth sensor sees to the point (the nose and
+    /// the ears are on the surface, an eye about a centimetre behind it; estimates).
+    private static let faceMap: [(VNHumanBodyPoseObservation.JointName, Int, Float)] = [
+        (.nose, Int(L2K_SRC_NOSE), 0), (.leftEye, Int(L2K_SRC_EYE_LEFT), 0.01), (.rightEye, Int(L2K_SRC_EYE_RIGHT), 0.01),
+        (.leftEar, Int(L2K_SRC_EAR_LEFT), 0), (.rightEar, Int(L2K_SRC_EAR_RIGHT), 0),
+    ]
 
     /// Everyone Vision finds in `image`, for a device rolled by `quadrant`. Empty on failure (see `lastError`).
     func detect(in image: CVPixelBuffer, quadrant: Int32) -> [VisionPerson] {
@@ -107,7 +116,10 @@ final class VisionBodyDetector {
         let root = position(.root), neck = position(.neck)
         let centre = root ?? neck ?? SIMD2(joints[0].u, joints[0].v)
         let size: Float = (root != nil && neck != nil) ? simd_distance(root!, neck!) : 0
-        return VisionPerson(joints: joints, centre: centre, size: size)
+        let face = Self.faceMap.compactMap { name, source, radius in
+            position(name).map { DepthLiftJoint(source: source, u: $0.x, v: $0.y, radius: radius) }
+        }
+        return VisionPerson(joints: joints, centre: centre, size: size, face: face)
     }
 }
 
@@ -426,7 +438,9 @@ final class VisionHybridDetector {
         let person = people.min { simd_distance($0.centre, SIMD2(modelRoot.u, modelRoot.v)) < simd_distance($1.centre, SIMD2(modelRoot.u, modelRoot.v)) }
         var joints: [VisionJoint3D] = []
         var seen = Set<Int>()
+        var face: [DepthLiftJoint] = []
         if let person, simd_distance(person.centre, SIMD2(modelRoot.u, modelRoot.v)) < 0.25 {
+            face = person.face
             for joint in person.joints {
                 guard let d = depth[joint.source] ?? depth[Int(L2K_SRC_PELVIS)] else { continue }
                 joints.append(VisionJoint3D(source: joint.source, u: joint.u, v: joint.v, depth: d, confidence: 2))
@@ -498,7 +512,30 @@ final class VisionHybridDetector {
             }
             for (j, l) in pictureLengths { lengths[j] = l }
         }
-        return VisionKinematics.lift(joints, lengths: lengths, away: away, camera: camera, placement: placement)
+        let lifted = VisionKinematics.lift(joints, lengths: lengths, away: away, camera: camera, placement: placement)
+        guard !face.isEmpty, let head = lifted.first(where: { $0.source == Int(L2K_SRC_HEAD) }) else { return lifted }
+        return lifted + Self.placeFace(face, head: head, camera: camera)
+    }
+
+    /// Distance from the head centre to each face point on a typical head (metres): the 30-joint body's own
+    /// estimates (docs/03 "The 30-joint body").
+    static let faceDistance: [Int: Float] = [
+        Int(L2K_SRC_NOSE): 0.087, Int(L2K_SRC_EYE_LEFT): 0.087, Int(L2K_SRC_EYE_RIGHT): 0.087,
+        Int(L2K_SRC_EAR_LEFT): 0.076, Int(L2K_SRC_EAR_RIGHT): 0.076,
+    ]
+
+    /// The face points of a picture without depth, around the head as placed: each on its own ray, that far from the
+    /// head centre - the nose and the eyes on the side towards the camera (a face the 2D detector sees is turned
+    /// towards it), an ear at the point of its ray nearest the head centre (beside the head). Where the picture puts a
+    /// point farther off the head than that, the nearest point of its ray is used.
+    static func placeFace(_ face: [DepthLiftJoint], head: VisionJoint3D, camera: l2k_src_camera) -> [VisionJoint3D] {
+        let centre = VisionKinematics.point(u: head.u, v: head.v, depth: head.depth, camera: camera)
+        let ears: Set<Int> = [Int(L2K_SRC_EAR_LEFT), Int(L2K_SRC_EAR_RIGHT)]
+        return face.map { point in
+            let p = VisionKinematics.child(parent: centre, u: point.u, v: point.v, length: faceDistance[point.source] ?? 0.087,
+                                           away: false, camera: camera, perpendicular: ears.contains(point.source))
+            return VisionJoint3D(source: point.source, u: point.u, v: point.v, depth: -p.z, confidence: 2)
+        }
     }
 }
 

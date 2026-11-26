@@ -11,8 +11,10 @@ what the Windows side asks of the app next. Written from the Windows side at Dan
 | Dance Evolution Arcade (x86) | `windows/kinect10`, `windows/spicehook` | skeleton, depth, colour | working in the game (fake sender, and Danny's own play with the app) |
 | DanceAround (x64) | `windows/vp4u` — replaces the game's `VisionPoseWrapper.dll` | skeleton only | **playable with `l2k_fake_sender`**: the game's player calibration measures the figure mid play area, two songs played to the result screen at 30 pose frames/s; **not yet run with the app** |
 
-DanceAround takes today's L2K1 stream unchanged: nothing in `shared/` or `ios/` changed for it.
-Its CONFIG carries `consumer_kind` 0 (unknown) and the PC's name; it advertises `_l2k._udp`.
+Since app 0.10.0 (2026-11-26) the app and `shared/` have DanceAround's side of the stream: consumer kind 5,
+CONFIG `rate`, the 30-joint BODY stream (`docs/02` §3, §4b; `docs/03` §4, §4b). **The Windows side has not
+adopted them yet**: vp4u still sends `consumer_kind` 0 and asks for SKELETON at the default rate, so it gets
+what it got before (SKELETON at 30, Dance Evolution's play area). It advertises `_l2k._udp`.
 Details: `windows/vp4u/README.md`, `windows/docs/vp4u-interface.md`, `docs/04-status.md`.
 
 ## What DanceAround relies on — do not break
@@ -32,15 +34,27 @@ Details: `windows/vp4u/README.md`, `windows/docs/vp4u-interface.md`, `docs/04-st
 - Stable `tracking_id`; joint states (the game treats inferred as valid). Only fully tracked bodies
   are used; the game takes the nearest one.
 
-### The app's Dance Evolution options and DanceAround
+### The app's play-area options and DanceAround
 
-Both are tuned for Dance Evolution's play area, and the app cannot yet tell which game it feeds:
+The app takes the game from the receiver's `consumer_kind` (`L2KGame`, `l2k_game_of_consumer`; kept while no
+receiver is connected; `-l2kGame 1` starts on DanceAround):
 
-- **"Fit me into the game's play area"** (on by default): slides a body outside 1.80–3.20 m /
-  ±1.25 m to just inside. For DanceAround it helps a player who stands too close, but someone at
-  2.9–3.2 m or more than 0.9 m to the side stays outside DanceAround's area and is not seen.
-- **"Best position for Dance Evolution"** (off by default): level frame, player at 2.5 m, centred —
-  inside DanceAround's area, so usable as is. With 2 players, DanceAround takes only the nearer.
+- **"Fit me into the game's play area"** (on by default): DanceAround's box is 1.80–2.80 m / ±0.90 m
+  (the fit keeps 10 cm inside), Dance Evolution's 1.80–3.20 m / ±1.25 m.
+- **"Best position for <game>"** (off by default): level frame, one player centred at 2.3 m for
+  DanceAround (one player only), 2.5 m for Dance Evolution (1 or 2 players).
+
+Both assume vp4u's default phone placement (`phone_x` 0.55, `phone_z` 0); moving it in `l2k.ini`
+moves DanceAround's box without the app knowing.
+
+## Done on the Apple side (0.10.0), waiting for the Windows side
+
+- `L2K_CONSUMER_VP4U` = 5 → DanceAround's play area and standing point (ask 2 below).
+- CONFIG `rate` (byte 43): the app sends up to that many skeleton / body frames a second; images
+  stay at 30. 60 from the camera-only sources needs "Faster camera" on (the app says so) (ask 3).
+- BODY (0x13, stream bit 0x8): 30 joints in vp4u's order, nose / eyes / ears from Vision 2D or
+  ARKit, the rest placed with the formulas that were `vp4u_map.cpp`'s, now in `shared/`
+  (`l2k_mapper_body_frame`, `l2k_body_frame_from_skeleton`) (ask 4).
 
 ## Next, in order
 
@@ -50,23 +64,19 @@ Both are tuned for Dance Evolution's play area, and the app cannot yet tell whic
    player calibration (`GamePlayerCalib:result pos (x, y, z)` should be near (0.55, −0.2, 2.3)),
    and **left/right**: raise the right arm, the avatar should mirror it like a mirror would (if
    not, `[vp4u] mirror_x=1` on Windows — tell the Windows side, it is open point 1 there).
-2. **A `consumer_kind` for the vp4u receiver** (e.g. `L2K_CONSUMER_VP4U = 5`), so the app can apply
-   the right play area — DanceAround's box above, or none — instead of Dance Evolution's.
-3. **60 fps for DanceAround.** Its cameras ran at 60; the app now captures at 60 on the ultra-wide
-   lens but `L2KSession.outputRate` is 30, which Dance Evolution must keep. Per receiver: an app
-   setting is enough to start; asking for it in CONFIG is a protocol decision.
-4. **A 30-joint body stream.** DanceAround's skeleton is Kinect v2's 25 joints + nose, eyes, ears
-   (order in `windows/vp4u/vp4u_abi.h`). The Windows side derives 10 of them from the 20 Kinect v1
-   joints (`windows/docs/vp4u-interface.md` §6). ARKit and Vision have most of them (thumbs, finger
-   tips, nose, eyes; Vision 2D also ears). Proposal: a new stream bit and packet type with that
-   joint set, same space and conventions as SKELETON; old receivers never ask for it.
-
-2–4 change `shared/` (a stream bit, a packet type, a CONFIG field or value): additions only, so
-old peers are unaffected, but follow the root `CLAUDE.md` (tests, golden packets, `docs/02`, a
-`docs/04-status.md` entry) and settle the layout with the Windows side first — `windows/vp4u`
-is its consumer.
+2. ~~A `consumer_kind` for the vp4u receiver~~ — done in `shared/` and the app (0.10.0); the
+   Windows side sends it next.
+3. ~~60 fps for DanceAround~~ — CONFIG `rate`, done in `shared/` and the app; the Windows side asks
+   for 60 next. To see on a device: how many frames a second Vision keeps up with at 60
+   (the "Camera frames … used" diagnostics line; the receiver card's "Frames a second").
+4. ~~A 30-joint body stream~~ — BODY, done in `shared/` and the app; the Windows side asks for it
+   and maps it next (`windows/AGENT_PROMPT.md`, "DanceAround: what the Apple side added").
+5. **Hand tips and thumbs from the picture.** No source tracks them yet: they are placed from the
+   wrist and hand. Vision's hand pose request (`VNDetectHumanHandPoseRequest`) would give them at a
+   cost per frame; worth it only if DanceAround is found to use the hands.
 
 ## Placement text for the app (DanceAround)
 
 Phone centred in front of the play area, rear camera towards the player, landscape, about 1 m
-up; the player stands about 2.3 m away (1.8–2.8 m), within 0.9 m of the centre line.
+up; the player stands about 2.3 m away (1.8–2.8 m), within 0.9 m of the centre line. Shown in the
+receiver card when the game is DanceAround (0.10.0).
